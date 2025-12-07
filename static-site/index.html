@@ -2871,7 +2871,33 @@
         }
     </script>
     
-    <!-- 加载 Google Maps API 脚本 -->
-    <script async defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAqfM8VxP7S-8Jl1Eu4WDbDf1zz-JHiKHw&callback=initMap&libraries=geometry,places"></script>
+    <!-- Dynamically load Google Maps API script -->
+    <script>
+      (async () => {
+        try {
+          const response = await fetch('/api/get-google-api-key');
+          if (!response.ok) {
+            throw new Error(`Failed to fetch API key: ${response.status}`);
+          }
+          const { key } = await response.json();
+          if (!key) {
+            throw new Error('API key is missing from the response.');
+          }
+
+          const script = document.createElement('script');
+          script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&callback=initMap&libraries=geometry,places`;
+          script.async = true;
+          script.defer = true;
+          document.head.appendChild(script);
+        } catch (error) {
+          console.error('Failed to load Google Maps:', error);
+          // Optionally, display an error message to the user on the page
+          const matrixView = document.getElementById('matrix-view');
+          if(matrixView) {
+            matrixView.innerHTML = `<p class="text-red-600 p-4 font-bold">Could not load Google Maps. Please check the API key configuration.</p>`;
+          }
+        }
+      })();
+    </script>
 </body>
 </html>
