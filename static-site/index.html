@@ -1,0 +1,2877 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微运实时货运矩阵</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // 使用 Inter 字体和自定义地图配色方案
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        'primary-blue': '#10508d',
+                        'accent-orange': '#f97316',
+                        'restriction-red': '#dc2626',
+                        // 新的货车状态颜色
+                        'status-off-track': '#ef4444',     // 红色 (偏离轨道)
+                        'status-on-time': '#10b981',       // 绿色 (准时到达)
+                        'status-risk-late': '#f59e0b',     // 黄色 (迟到风险)
+                        'status-late': '#9333ea',          // 紫色 (已经迟到)
+                        'status-disconnected': '#9ca3af',  // 灰色 (司机断联)
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* 地图和响应式布局的自定义样式 */
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background-color: #f3f4f6;
+        }
+        /* 地图必须充满父容器 */
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+        /* 矩阵容器 */
+        #matrix-grid {
+            display: grid;
+            /* 动态计算列数，单元格最小宽度设置为 120px，实现动态行数 */
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); 
+            gap: 8px; /* 增大间距以配合大尺寸 */
+            padding: 8px;
+        }
+        /* 矩阵单元格 */
+        .matrix-cell {
+            aspect-ratio: 1 / 1; /* 保持正方形 */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-size: 1rem; /* 增大字体 */
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 6px; /* rounded-md */
+            transition: all 0.15s ease-in-out;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            padding: 4px; /* 增加内边距防止 huoyunId 过长溢出 */
+            text-align: center;
+        }
+        .matrix-cell:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            opacity: 0.9;
+        }
+        /* 状态颜色 */
+        .status-off-track { background-color: #ef4444; color: white; } /* 偏离轨道 - 红色 */
+        .status-on-time { background-color: #10b981; color: white; } /* 准时到达 - 绿色 */
+        .status-risk-late { background-color: #f59e0b; color: #333; } /* 迟到风险 - 黄色 */
+        .status-late { background-color: #9333ea; color: white; } /* 已经迟到 - 紫色 */
+        .status-disconnected { background-color: #9ca3af; color: white; } /* 司机断联 - 灰色 */
+
+        /* 隐藏实用工具类 */
+        .hidden { display: none; }
+        
+        /* 自定义滚动条 */
+        .overflow-y-auto::-webkit-scrollbar { width: 8px; }
+        .overflow-y-auto::-webkit-scrollbar-thumb { background-color: #d1d5db; border-radius: 10px; }
+        
+        /* 货运信息 Overlay 样式 - 固定在右上角 */
+        #shipment-overlay {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 400px;
+            max-width: calc(100vw - 40px);
+            max-height: calc(100vh - 40px);
+            z-index: 1000;
+            display: none;
+            pointer-events: none; /* 默认不拦截事件 */
+        }
+        
+        #shipment-overlay.show {
+            display: block;
+            pointer-events: auto; /* 显示时拦截事件 */
+        }
+        
+        #shipment-overlay-content {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.15), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
+            border: 1px solid #e5e7eb;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            max-height: calc(100vh - 40px);
+            animation: slideInFromRight 0.3s ease-out;
+        }
+        
+        @keyframes slideInFromRight {
+            from {
+                opacity: 0;
+                transform: translateX(100%);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        #shipment-overlay-header {
+            background: linear-gradient(to right, #10508d, #1e40af);
+            color: white;
+            padding: 12px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+            cursor: move; /* 可选：添加拖拽提示 */
+        }
+        
+        #shipment-overlay-body {
+            padding: 16px;
+            overflow-y: auto;
+            flex: 1;
+            max-height: calc(100vh - 120px);
+        }
+        
+        #shipment-overlay-body::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        #shipment-overlay-body::-webkit-scrollbar-thumb {
+            background-color: #d1d5db;
+            border-radius: 10px;
+        }
+        
+        #shipment-close-btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background-color 0.2s;
+            flex-shrink: 0;
+        }
+        
+        #shipment-close-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* 卫星路线子窗口样式 */
+        #route-modal {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(15, 23, 42, 0.65);
+            z-index: 2000;
+            padding: 16px;
+        }
+
+        #route-modal.hidden {
+            display: none;
+        }
+
+        #route-modal-content {
+            background: white;
+            border-radius: 12px;
+            width: min(1200px, 100%);
+            height: min(90vh, 760px);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #route-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-bottom: 1px solid #e5e7eb;
+            background: linear-gradient(90deg, #0f172a, #1d4ed8);
+            color: #f8fafc;
+        }
+
+        #route-close-btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            color: white;
+            width: 32px;
+            height: 32px;
+            border-radius: 9999px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background-color 0.2s;
+        }
+
+        #route-close-btn:hover {
+            background: rgba(255, 255, 255, 0.35);
+        }
+
+        #route-modal-body {
+            position: relative;
+            flex: 1;
+            background: #0b1437;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #route-map {
+            flex: 1;
+            min-height: 400px;
+        }
+
+        #route-insights {
+            background: rgba(15, 23, 42, 0.9);
+            color: #e2e8f0;
+            padding: 14px 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        #route-eta {
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+
+        #route-restrictions-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        #route-restrictions-list li {
+            background: rgba(248, 113, 113, 0.15);
+            border: 1px solid rgba(248, 113, 113, 0.4);
+            color: #fecaca;
+            border-radius: 9999px;
+            padding: 4px 10px;
+            font-size: 0.8rem;
+        }
+
+        #route-loading {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(11, 20, 55, 0.92);
+            color: #e2e8f0;
+            text-align: center;
+            gap: 12px;
+            padding: 24px;
+        }
+
+        #route-loading.hidden {
+            display: none;
+        }
+
+        #route-progress-track {
+            width: min(320px, 80%);
+            height: 6px;
+            background: rgba(226, 232, 240, 0.2);
+            border-radius: 9999px;
+            overflow: hidden;
+        }
+
+        #route-progress-bar {
+            height: 100%;
+            width: 40%;
+            background: linear-gradient(90deg, #34d399, #3b82f6);
+            border-radius: 9999px;
+            animation: routeProgress 1.6s infinite;
+        }
+
+        @keyframes routeProgress {
+            0% { transform: translateX(-100%); }
+            50% { transform: translateX(10%); }
+            100% { transform: translateX(120%); }
+        }
+        
+        /* 移动端适配 */
+        @media (max-width: 768px) {
+            #shipment-overlay {
+                top: 10px;
+                right: 10px;
+                left: 10px;
+                width: auto;
+                max-width: none;
+            }
+            
+            #shipment-overlay-content {
+                max-height: calc(100vh - 20px);
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="h-screen flex flex-col lg:flex-row">
+        
+        <!-- 左侧：控制面板和状态栏 -->
+        <div id="control-panel" class="bg-white p-4 shadow-lg lg:w-96 w-full flex-shrink-0 overflow-y-auto max-h-[50vh] lg:h-full lg:max-h-full">
+            <h1 class="text-2xl font-bold text-primary-blue mb-4 flex items-center">
+                <svg class="w-6 h-6 mr-2 text-accent-orange" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17l-4 4m0 0l-4-4m4 4V3m12 7v12m0 0l4-4m-4 4l-4-4m4-12v12"></path></svg>
+                微运实时货运矩阵
+            </h1>
+
+            <!-- 认证状态 -->
+            <div id="auth-status" class="text-sm mb-4 p-2 bg-gray-100 rounded-lg">
+                <span class="font-medium text-gray-700">用户ID:</span> <span id="user-id-display" class="break-all text-xs text-primary-blue">加载中...</span>
+            </div>
+
+            <!-- 返回矩阵按钮 (仅在地图视图中显示) -->
+            <button id="back-to-matrix-button" class="hidden w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-md transition duration-200 mb-4">
+                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7"></path></svg>
+                返回矩阵概览
+            </button>
+
+
+            <!-- GPS 轨迹部分 (现在用于详细追踪) -->
+            <div id="gps-detail-panel" class="mb-6 border-b pb-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">详细追踪</h2>
+                
+                <!-- 货运ID是用户看到的，包含轨迹数量 -->
+                <div class="text-sm mb-2 text-gray-600">当前货运单号 (huoyunId): <span class="font-bold text-primary-blue" id="current-huoyun-id">无</span></div>
+                
+                <!-- 进度和加载状态显示区域 -->
+                <div id="loading-status-area" class="text-xs italic text-gray-500 mb-3 h-4"></div>
+
+                <div id="gps-status" class="text-sm mb-2 text-gray-600">追踪状态: <span class="font-medium" id="trace-state">未加载</span></div>
+                
+                <!-- "重新加载" 按钮，初始禁用 -->
+                <button id="gps-button" class="w-full bg-primary-blue hover:bg-blue-800 text-white font-bold py-2 px-4 rounded-md transition duration-200" disabled>
+                    重新加载
+                </button>
+                <p class="text-xs mt-2 text-gray-500 italic p-2 bg-gray-50 rounded-md">
+                    点击矩阵单元格将自动加载该货运单号下的所有轨迹。
+                </p>
+            </div>
+
+
+            <!-- 地图图层控制 (在地图视图中才相关) -->
+            <div id="layer-control" class="mb-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">地图图层</h2>
+                <div class="flex flex-col space-y-2">
+                    <label class="inline-flex items-center">
+                        <input type="checkbox" id="traffic-toggle" checked class="form-checkbox h-5 w-5 text-accent-orange rounded">
+                        <span class="ml-2 text-gray-700">实时交通</span>
+                    </label>
+                    <label class="inline-flex items-center">
+                        <input type="checkbox" id="satellite-toggle" class="form-checkbox h-5 w-5 text-accent-orange rounded">
+                        <span class="ml-2 text-gray-700">卫星视图</span>
+                    </label>
+                    <label class="inline-flex items-center">
+                        <input type="checkbox" id="restriction-toggle" class="form-checkbox h-5 w-5 text-restriction-red rounded">
+                        <span class="ml-2 text-gray-700">模拟货车限制区域</span>
+                    </label>
+                </div>
+            </div>
+            
+        </div>
+
+        <!-- 右侧：主要内容区域 (矩阵或地图) -->
+        <div id="main-content" class="flex-1 min-h-full overflow-auto bg-gray-100">
+            
+            <!-- 矩阵视图 -->
+            <div id="matrix-view" class="w-full h-full p-4 overflow-y-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 id="matrix-title" class="text-2xl font-bold text-gray-700">正在加载货车状态...</h2>
+                    <button id="matrix-reload-btn" class="bg-primary-blue hover:bg-blue-800 text-white font-bold py-2 px-4 rounded-md transition duration-200 flex items-center justify-center ml-auto">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0h5m-9 9v-5h.582m15.356-2A8.001 8.001 0 014.582 15m0 0h5"></path></svg>
+                        重新加载货车概览
+                    </button>
+                </div>
+                <div id="matrix-grid">
+                    <!-- Matrix cells will be injected here -->
+                    <div id="matrix-loading" class="text-gray-500 p-4">
+                        <p>请确保云函数接口 <code class="bg-gray-200 p-1 rounded">/getTracks</code> 和 <code class="bg-gray-200 p-1 rounded">/getTrackPoints</code> 可访问。</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 地图视图 (默认隐藏) -->
+            <div id="map-view" class="hidden w-full h-full flex flex-col">
+                 <!-- Map container -->
+                 <div id="map" class="flex-1 w-full"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 货运详细信息 Overlay - 固定在右上角 -->
+    <div id="shipment-overlay">
+        <div id="shipment-overlay-content">
+            <!-- Overlay 头部 -->
+            <div id="shipment-overlay-header">
+                <h2 class="text-lg font-bold">货运详细信息</h2>
+                <button id="shipment-close-btn" title="关闭">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <!-- Overlay 内容 -->
+            <div id="shipment-overlay-body">
+                <!-- 加载状态 -->
+                <div id="shipment-loading" class="text-center py-6">
+                    <svg class="animate-spin h-6 w-6 text-primary-blue mx-auto mb-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p class="text-gray-600 text-sm">正在加载...</p>
+                </div>
+                
+                <!-- 详细信息内容 -->
+                <div id="shipment-info-content" class="hidden">
+                    <!-- 内容将通过 JavaScript 动态填充 -->
+                </div>
+                
+                <!-- 错误提示 -->
+                <div id="shipment-error" class="hidden text-center py-6">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-red-500 mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    <p class="text-red-600 font-semibold text-sm">无法加载</p>
+                    <p class="text-xs text-gray-500 mt-1" id="shipment-error-message">请检查货运号</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Google 卫星路线子窗口 -->
+    <div id="route-modal" class="hidden">
+        <div id="route-modal-content">
+            <div id="route-modal-header">
+                <div>
+                    <p class="text-sm opacity-80">Google Maps 卫星路线</p>
+                    <p id="route-origin-label" class="text-xs opacity-70"></p>
+                </div>
+                <button id="route-close-btn" aria-label="关闭卫星路线窗口">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            <div id="route-modal-body">
+                <div id="route-map"></div>
+                <div id="route-insights">
+                    <p id="route-eta">等待加载卡车路线...</p>
+                    <ul id="route-restrictions-list">
+                        <li>正在收集卡车限制数据...</li>
+                    </ul>
+                </div>
+                <div id="route-loading" class="hidden">
+                    <svg class="h-10 w-10 text-emerald-300 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-30" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.39 0 1 4.03 1 12h3z"></path>
+                    </svg>
+                    <p id="route-loading-message" class="text-sm">正在加载卡车卫星路线，请稍候...</p>
+                    <div id="route-progress-track">
+                        <div id="route-progress-bar"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 腾讯云 CloudBase Web SDK -->
+    <!-- 方式1：使用 CDN（推荐） -->
+    <script src="https://static.cloudbase.net/cloudbase-js-sdk/2.21.6/cloudbase.full.js?v=1"></script>
+    <!-- 方式2：如果 CDN 不可用，可以使用 npm 安装：npm install @cloudbase/js-sdk，然后使用打包工具引入 -->
+    <script>
+        // 全局变量用于 CloudBase 和 Maps
+        let tcb;
+        let currentUser = null; // 当前登录用户信息
+        let accessToken = null; // 访问令牌，用于 API 调用
+        
+        // CloudBase 环境配置
+        // 注意：需要替换为你的实际环境 ID
+        const CLOUDBASE_ENV_ID = typeof __cloudbase_env_id !== 'undefined' ? __cloudbase_env_id : 'hk-test-6g3eu25ua1c0dbb7';
+        
+        // --- 1. 初始化 CloudBase（等待 SDK 加载完成） ---
+        function initCloudBase() {
+            // 检查 SDK 是否已加载
+            // cloudbase.full.js 暴露的全局变量可能是 cloudbase 或 tcb
+            const CloudBaseSDK = window.cloudbase || window.tcb || window.CloudBase;
+            
+            if (!CloudBaseSDK) {
+                console.warn("CloudBase SDK 尚未加载，等待中...");
+                // 如果 SDK 未加载，等待 100ms 后重试
+                setTimeout(initCloudBase, 100);
+                return;
+            }
+            
+            try {
+                // 使用正确的初始化方法
+                // cloudbase.full.js 通常使用 cloudbase.init() 或 cloudbase.initApp()
+                if (typeof CloudBaseSDK.init === 'function') {
+                    tcb = CloudBaseSDK.init({
+                        env: CLOUDBASE_ENV_ID
+                    });
+                } else if (typeof CloudBaseSDK.initApp === 'function') {
+                    tcb = CloudBaseSDK.initApp({
+                        env: CLOUDBASE_ENV_ID
+                    });
+                } else {
+                    // 如果都没有，尝试直接使用
+                    tcb = CloudBaseSDK;
+                    // 然后设置环境
+                    if (tcb && typeof tcb.setEnv === 'function') {
+                        tcb.setEnv(CLOUDBASE_ENV_ID);
+                    }
+                }
+                
+                console.log("CloudBase 初始化成功", tcb);
+            } catch (e) {
+                console.error("CloudBase 初始化失败:", e);
+                console.error("可用的全局变量:", {
+                    cloudbase: typeof window.cloudbase,
+                    tcb: typeof window.tcb,
+                    CloudBase: typeof window.CloudBase
+                });
+            }
+        }
+        
+        // 页面加载完成后初始化（确保 SDK 已加载）
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initCloudBase);
+        } else {
+            // 如果 DOM 已经加载完成，直接初始化
+            initCloudBase();
+        }
+
+        // --- 2. 微信登录和认证 ---
+        function isWeChatBrowser() {
+            var ua = window.navigator.userAgent.toLowerCase();
+            return ua.match(/MicroMessenger/i) == 'micromessenger';
+        }
+
+        async function authenticateWithWeChat() {
+            if (!isWeChatBrowser()) {
+                console.error("微信登录仅支持在微信浏览器中使用。");
+                return false;
+            } else {
+                console.log("微信浏览器中使用。");
+            }
+        
+            if (!tcb) {
+                console.error("CloudBase 未初始化");
+                updateUserDisplay('未初始化', 'error');
+                return false;
+            }
+
+            try {
+                // 检查 auth 方法是否存在（不同版本的 SDK API 可能不同）
+                const auth = tcb.auth || (tcb.app && tcb.app.auth) || (tcb.getAuth && tcb.getAuth());
+                
+                if (!auth) {
+                    console.error("无法获取 auth 对象，SDK 版本可能不兼容");
+                    updateUserDisplay('SDK 版本不兼容', 'error');
+                    return false;
+                }
+
+                // 检查是否已经登录
+                let authState = false;
+                try {
+                    if (typeof auth.hasLoginState === 'function') {
+                        authState = await auth.hasLoginState();
+                    } else if (typeof auth.getLoginState === 'function') {
+                        const state = await auth.getLoginState();
+                        authState = !!state;
+                    }
+                } catch (e) {
+                    console.log("检查登录状态时出错（可能未登录）:", e);
+                    authState = false;
+                }
+
+                if (authState) {
+                    // 已登录，获取用户信息
+                    try {
+                        const loginState = await auth.getLoginState();
+                        currentUser = loginState.userInfo || loginState;
+                        accessToken = loginState.accessToken || loginState.credential?.accessToken;
+                        updateUserDisplay(currentUser);
+                        console.log("用户已登录:", currentUser);
+                        return true;
+                    } catch (e) {
+                        console.warn("获取登录状态失败:", e);
+                        // 继续执行登录流程
+                    }
+                }
+
+                // 未登录，使用微信登录
+                updateUserDisplay('正在登录...', 'loading');
+                
+                // 获取微信登录提供者
+                let weixinProvider;
+                try {
+                    if (typeof auth.weixinAuthProvider === 'function') {
+                        weixinProvider = auth.weixinAuthProvider({
+                            appid: typeof __wechat_appid !== 'undefined' ? __wechat_appid : ''
+                        });
+                    } else if (typeof auth.getWeixinAuthProvider === 'function') {
+                        weixinProvider = auth.getWeixinAuthProvider({
+                            appid: typeof __wechat_appid !== 'undefined' ? __wechat_appid : ''
+                        });
+                    } else {
+                        throw new Error("无法获取微信登录提供者");
+                    }
+                } catch (providerError) {
+                    console.error("获取微信登录提供者失败:", providerError);
+                    throw providerError;
+                }
+                
+                // 方式1：使用 popup 弹出二维码（推荐，用户体验更好）
+                try {
+                    if (typeof weixinProvider.signInWithPopup === 'function') {
+                        const loginResult = await weixinProvider.signInWithPopup();
+                        
+                        if (loginResult && (loginResult.userInfo || loginResult)) {
+                            currentUser = loginResult.userInfo || loginResult;
+                            accessToken = loginResult.accessToken || loginResult.credential?.accessToken;
+                            updateUserDisplay(currentUser);
+                            console.log("微信登录成功:", currentUser);
+                            return true;
+                        }
+                    } else {
+                        throw new Error("signInWithPopup 方法不可用");
+                    }
+                } catch (popupError) {
+                    console.warn("Popup 登录失败，尝试 redirect 方式:", popupError);
+                    
+                    // 方式2：使用 redirect 跳转到微信登录页（fallback）
+                    try {
+                        if (typeof weixinProvider.signInWithRedirect === 'function') {
+                            await weixinProvider.signInWithRedirect();
+                            // redirect 后不会返回，页面会跳转
+                            return false; // 等待跳转
+                        } else if (typeof weixinProvider.signIn === 'function') {
+                            await weixinProvider.signIn();
+                            return false;
+                        } else {
+                            throw new Error("没有可用的登录方法");
+                        }
+                    } catch (redirectError) {
+                        console.error("Redirect 登录也失败:", redirectError);
+                        throw redirectError;
+                    }
+                }
+            } catch (error) {
+                console.error("微信登录失败:", error);
+                updateUserDisplay(`登录失败: ${error.message || error}`, 'error');
+                
+                // 如果是未授权错误，显示提示
+                if (error.code === 'AUTH_FAILED' || (error.message && error.message.includes('未授权'))) {
+                    showAuthError();
+                }
+                return false;
+            }
+        }
+
+        // --- 3. 更新用户信息显示 ---
+        function updateUserDisplay(userInfo, status = 'success') {
+            const userDisplay = document.getElementById('user-id-display');
+            if (!userDisplay) return;
+
+            if (status === 'loading') {
+                userDisplay.textContent = userInfo;
+                userDisplay.className = 'break-all text-xs text-gray-600';
+            } else if (status === 'error') {
+                userDisplay.textContent = userInfo;
+                userDisplay.className = 'break-all text-xs text-red-600';
+            } else if (userInfo && typeof userInfo === 'object') {
+                // 显示用户信息：优先显示昵称，其次 openid
+                const displayName = userInfo.nickName || userInfo.openid || userInfo.uid || '未知用户';
+                userDisplay.textContent = displayName;
+                userDisplay.className = 'break-all text-xs text-primary-blue';
+                
+                // 如果有更多信息，可以显示在 tooltip 或下方
+                if (userInfo.openid) {
+                    userDisplay.title = `OpenID: ${userInfo.openid}`;
+                }
+            } else {
+                userDisplay.textContent = '未登录';
+                userDisplay.className = 'break-all text-xs text-gray-500';
+            }
+        }
+
+        // --- 4. 显示授权错误提示 ---
+        function showAuthError() {
+            const authStatus = document.getElementById('auth-status');
+            if (authStatus) {
+                authStatus.innerHTML = `
+                    <div class="text-sm p-2 bg-red-50 border border-red-200 rounded-lg">
+                        <p class="font-medium text-red-700 mb-2">⚠️ 未授权访问</p>
+                        <p class="text-xs text-red-600">此应用仅限授权用户使用。请联系管理员添加你的微信账号到授权列表。</p>
+                    </div>
+                `;
+            }
+        }
+
+        // --- 5. 获取访问令牌（用于 API 调用） ---
+        async function getAccessToken() {
+            if (accessToken) {
+                return accessToken;
+            }
+            
+            if (!tcb) {
+                return null;
+            }
+            
+            try {
+                const auth = tcb.auth || (tcb.app && tcb.app.auth) || (tcb.getAuth && tcb.getAuth());
+                if (!auth) {
+                    return null;
+                }
+                
+                const loginState = await auth.getLoginState();
+                if (loginState && (loginState.accessToken || loginState.credential?.accessToken)) {
+                    accessToken = loginState.accessToken || loginState.credential.accessToken;
+                    return accessToken;
+                }
+            } catch (error) {
+                console.error("获取访问令牌失败:", error);
+            }
+            
+            return null;
+        }
+
+        // --- 6. 页面加载时自动尝试登录 ---
+        (async function initAuth() {
+            // 等待 CloudBase 初始化完成
+            if (!tcb) {
+                // 如果还未初始化，等待一段时间后重试（最多等待 5 秒）
+                const maxWaitTime = 5000; // 5秒
+                const startTime = Date.now();
+                const checkInterval = setInterval(() => {
+                    if (tcb) {
+                        clearInterval(checkInterval);
+                        initAuth(); // 重新执行
+                    } else if (Date.now() - startTime > maxWaitTime) {
+                        clearInterval(checkInterval);
+                        updateUserDisplay('CloudBase 初始化超时', 'error');
+                        console.error("CloudBase 初始化超时，请检查 SDK 是否正确加载");
+                    }
+                }, 100);
+                return;
+            }
+            
+            try {
+                const isAuthenticated = await authenticateWithWeChat();
+                if (!isAuthenticated) {
+                    // 如果自动登录失败，显示登录按钮
+                    showLoginButton();
+                }
+            } catch (authError) {
+                console.error("认证初始化失败:", authError);
+                showLoginButton();
+            }
+            
+            // 无论登录成功与否，都初始化地图（地图不依赖登录）
+            // 地图初始化由 Google Maps API 的 callback 机制自动触发
+            // 如果 Google Maps 已经加载，initMap 会被自动调用
+        })();
+
+        // --- 7. 显示登录按钮（如果自动登录失败） ---
+        function showLoginButton() {
+            const authStatus = document.getElementById('auth-status');
+            if (authStatus && tcb) {
+                const loginBtn = document.createElement('button');
+                loginBtn.className = 'w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-md transition duration-200 mt-2';
+                loginBtn.textContent = '点击微信登录';
+                loginBtn.onclick = async () => {
+                    loginBtn.disabled = true;
+                    loginBtn.textContent = '登录中...';
+                    const success = await authenticateWithWeChat();
+                    if (success) {
+                        loginBtn.remove();
+                    } else {
+                        loginBtn.disabled = false;
+                        loginBtn.textContent = '点击微信登录（重试）';
+                    }
+                };
+                authStatus.appendChild(loginBtn);
+            }
+        }
+    </script>
+
+    <!-- Google Maps JS API -->
+    <script>
+        // --- 调试日志配置 ---
+        const DEBUG = true; // 设置为 false 可禁用所有调试日志
+        
+        /**
+         * 打印调试日志
+         * @param {string} message - 日志信息
+         */
+        function debugLog(message) {
+            if (DEBUG) {
+                // 使用 ISO 格式时间戳，更易于排序和阅读
+                console.log(`[DEBUG] ${new Date().toISOString()} - ${message}`);
+            }
+        }
+
+        // --- API URL 配置 ---
+        const BASE_API_URL = 'https://hk-test-6g3eu25ua1c0dbb7-1384566033.ap-shanghai.app.tcloudbase.com';
+        // 用于获取货运列表和状态的 API
+        const TRACKS_API_URL = `${BASE_API_URL}/getTracks`; 
+        // 用于获取具体货运 GPS 轨迹的 API
+        const TRACE_POINTS_API_URL = `${BASE_API_URL}/getTrackPoints`;
+
+        // --- Google Sheets API 配置（用于获取货运详细信息）---
+        const PROXY_SECRET = 'juxie_nashville_0705';
+        const BASE_SHEET_URL = 'https://googlesheetproxy.vercel.app/?id=1kdUz9S6ie0t1K8-bXzis5E1dmc8s0UstTTgbSceLwoA&range=sampletab!';
+        
+        // 字段中文名到英文键的映射
+        const SHIPMENT_FIELD_MAP = {
+            '客户': 'client',
+            '描述': 'description',
+            '货车类型': 'truckType',
+            '提一地址': 'pickupAddress1',
+            '卸一地址': 'dropoffAddress1',
+            '卸二地址': 'dropoffAddress2',
+            '提货号': 'pickupNumber',
+            '货运号': 'shipmentNumber',
+            '提一时间': 'pickupTime1',
+            '卸一时间': 'dropoffTime1',
+            '卸二时间': 'dropoffTime2',
+            '货运公司': 'carrierCompany',
+            'VIN': 'vin',
+            '负责人': 'personInCharge',
+            '状态': 'status'
+        };
+
+        // --- 统一的 API 请求函数（自动携带登录态） ---
+        /**
+         * 发送带认证的 API 请求
+         * @param {string} url - API URL
+         * @param {Object} options - fetch 选项（method, headers, body 等）
+         * @returns {Promise<Response>} fetch Response 对象
+         */
+        async function authenticatedFetch(url, options = {}) {
+            // 获取访问令牌
+            // const token = await getAccessToken();
+            
+            // 构建请求头
+            const headers = {
+                'Content-Type': 'application/json',
+                ...(options.headers || {})
+            };
+            
+            // 如果有访问令牌，添加到请求头
+            // if (token) {
+            //     headers['Authorization'] = `Bearer ${token}`;
+            //     // 或者使用 CloudBase 标准的 header（根据你的云函数实现选择）
+            //     // headers['x-cloudbase-access-token'] = token;
+            // }
+            
+            // 合并选项
+            const fetchOptions = {
+                ...options,
+                headers: headers
+            };
+            
+            // 发送请求
+            const response = await fetch(url, fetchOptions);
+            
+            // 如果返回 401 未授权，尝试重新登录
+            // if (response.status === 401) {
+            //     console.warn("API 返回 401，尝试重新登录...");
+            //     const reAuthSuccess = await authenticateWithWeChat();
+            //     if (reAuthSuccess) {
+            //         // 重新获取 token 并重试
+            //         const newToken = await getAccessToken();
+            //         if (newToken) {
+            //             fetchOptions.headers['Authorization'] = `Bearer ${newToken}`;
+            //             return await fetch(url, fetchOptions);
+            //         }
+            //     }
+            //     throw new Error('未授权访问：请先完成微信登录');
+            // }
+            
+            debugLog(`authenticatedFetch: ${fetchOptions.method || 'GET'} to '${url}' with ${JSON.stringify(options)} completed with status ${response.status}.`);
+            return response;
+        } 
+
+        // --- 缓存配置 ---
+        const TRACKS_CACHE_EXPIRATION_MS = 300000; // 5分钟, /getTracks 缓存有效期
+        const GPS_PAGE_CACHE_EXPIRATION_MS = Infinity; // 轨迹点 /getTrackPoints 缓存有效期设置为无限
+        const TRACKS_CACHE_KEY = 'matrix_tracks_cache_v1';
+        const GPS_TRACE_CACHE_PREFIX = 'gps_trace_';
+
+        // 定义一些用于多轨迹渲染的颜色
+        const TRACE_COLORS = [
+            '#000000', // 黑色
+            '#607D8B', // 灰色
+            '#DB4437', // 红色 (Google Red)
+            '#F4B400', // 黄色 (Google Yellow)
+            '#0F9D58', // 绿色 (Google Green)
+            '#9C27B0', // 紫色
+            '#00BCD4', // 青色
+            '#FF9800', // 橙色
+        ];
+
+        const DEFAULT_MARKER_Z_INDEX = 10;
+        const LATEST_MARKER_Z_INDEX = 9999;
+        const LATEST_MARKER_BACKGROUND_COLOR = '#1D4ED8'; // 蓝底
+        const LATEST_MARKER_OPACITY = 0.8;
+
+        let map;
+        let polylineLayer = []; // 存储所有轨迹折线
+        let markerLayer = []; // 存储所有起点/终点标记
+        let restrictionPolygon;
+        let trafficLayer; 
+        const defaultCenter = { lat: 37.7749, lng: -122.4194 }; // 旧金山
+        
+        // 全局缓存结构: huoyunId 映射到其所有 trackId 的聚合数据
+        let huoyunTrackData = {}; 
+        let currentHuoyunId = null; // 新增：保存当前正在查看的 huoyunId
+        let trackOverlayMap = {}; // trackId -> { polyline, startMarker, endMarker, color, isLatest, status }
+        let recordingTrackTimers = {}; // trackId -> intervalId
+        const RECORDING_POLL_INTERVAL_MS = 10000; // recording 轨迹刷新频率 (毫秒)
+        let recordingTrackPartialBuffers = {}; // trackId -> { points: [], targetPage: number }
+        let routeMap = null;
+        let routeDirectionsService = null;
+        let routeDirectionsRenderer = null;
+        let routeTrafficLayer = null;
+        let routeAlertMarkers = [];
+        let routeEndpointMarkers = [];
+        
+        // 新增：用于平滑渲染的队列和循环
+        const renderingQueue = {}; // trackId -> { points: [], timeToRenderMs: 0 }
+
+        // --- 视图切换逻辑 ---
+        const matrixView = document.getElementById('matrix-view');
+        const mapView = document.getElementById('map-view');
+        const backButton = document.getElementById('back-to-matrix-button');
+        const currentIdDisplay = document.getElementById('current-huoyun-id');
+        const matrixTitle = document.getElementById('matrix-title');
+        const gridContainer = document.getElementById('matrix-grid');
+        const gpsButton = document.getElementById('gps-button');
+        const traceStateElement = document.getElementById('trace-state');
+        const loadingStatusArea = document.getElementById('loading-status-area');
+        const routeModal = document.getElementById('route-modal');
+        const routeOriginLabel = document.getElementById('route-origin-label');
+        const routeCloseButton = document.getElementById('route-close-btn');
+        const routeLoading = document.getElementById('route-loading');
+        const routeLoadingMessage = document.getElementById('route-loading-message');
+        const routeMapContainer = document.getElementById('route-map');
+        const routeEtaDisplay = document.getElementById('route-eta');
+        const routeRestrictionsList = document.getElementById('route-restrictions-list');
+
+        // --- 平滑渲染循环 ---
+        function startRenderingLoop() {
+            let lastFrameTime = performance.now();
+
+            function renderFrame(currentTime) {
+                const deltaTime = currentTime - lastFrameTime;
+                lastFrameTime = currentTime;
+                // debugLog(`renderFrame deltaTime=${deltaTime}ms`);
+
+                for (const trackId in renderingQueue) {
+                    const queue = renderingQueue[trackId];
+                    if (queue.points.length === 0) continue;
+
+                    const overlay = trackOverlayMap[trackId];
+                    if (!overlay || !overlay.polyline) {
+                        // Clean up invalid queue
+                        delete renderingQueue[trackId];
+                        continue;
+                    }
+
+                    // --- Accumulator-based rendering logic for accurate timing ---
+                    // Initialize accumulator if it doesn't exist for this track
+                    if (typeof queue.renderAccumulator === 'undefined') {
+                        queue.renderAccumulator = 0;
+                    }
+
+                    const pointsToRenderPerMs = queue.timeToRenderMs > 0 ? queue.points.length / queue.timeToRenderMs : queue.points.length;
+                    if (queue.timeToRenderMs > 0) {
+                        // Add the 'due' points for this frame to the accumulator
+                        queue.renderAccumulator += pointsToRenderPerMs * deltaTime;
+                    }
+
+                    // The actual number of points to render is the whole number part of the accumulator
+                    let pointsToRenderThisFrame = Math.floor(queue.renderAccumulator);
+
+                    // If we're at the end of the animation, just render all remaining points
+                    if (queue.timeToRenderMs <= 0 && queue.points.length > 0) {
+                        pointsToRenderThisFrame = queue.points.length;
+                    } else if (pointsToRenderThisFrame > queue.points.length) {
+                        pointsToRenderThisFrame = queue.points.length;
+                    }
+
+                    // Subtract the rendered points from the accumulator
+                    if (pointsToRenderThisFrame > 0) {
+                        queue.renderAccumulator -= pointsToRenderThisFrame;
+                    }
+
+                    // Update remaining time
+                    if (queue.timeToRenderMs > 0) {
+                        queue.timeToRenderMs -= deltaTime;
+                        if (queue.timeToRenderMs < 0) {
+                            queue.timeToRenderMs = 0;
+                        }
+                    }
+                    // --- End of new logic ---
+
+                    debugLog('pointsThisFrame', pointsToRenderThisFrame, "pointsPerSec", pointsToRenderPerMs*1000.0,
+				"deltaTimeSec", deltaTime/1000.0);
+                      
+
+                    const newPoints = queue.points.splice(0, pointsToRenderThisFrame);
+                    const currentPath = overlay.polyline.getPath();
+                    
+                    newPoints.forEach(p => currentPath.push(new google.maps.LatLng(p.lat, p.lng)));
+
+                    // Update end marker position
+                    if (currentPath.getLength() > 0) {
+                        overlay.endMarker.setPosition(currentPath.getAt(currentPath.getLength() - 1));
+                    }
+                }
+                requestAnimationFrame(renderFrame);
+            }
+            requestAnimationFrame(renderFrame);
+        }
+
+        // 定义五种详细状态（忽略 API 返回的简易状态）
+        const DETAILED_STATUSES = [
+            { name: '准时到达', class: 'status-on-time' },       // 绿色
+            { name: '偏离轨道', class: 'status-off-track' },     // 红色
+            { name: '迟到风险', class: 'status-risk-late' },     // 黄色
+            { name: '已经迟到', class: 'status-late' },          // 紫色
+            { name: '司机断联', class: 'status-disconnected' },  // 灰色
+        ];
+
+        const ROUTE_DESTINATION_ADDRESS = 'ind9 , 2140 Stacies Wy, Greenwood, IN 46143';
+        const ROUTE_ALERTS = [
+            {
+                id: 'low-clearance-bridge',
+                name: '低限高桥',
+                description: 'I-465 W 方向 13ft 6in 高度限制，建议提前并线',
+                severity: '高',
+                location: { lat: 39.65368, lng: -86.09421 }
+            },
+            {
+                id: 'restricted-weight',
+                name: '限重路段',
+                description: 'County Line Rd 限重 20 吨，建议绕行',
+                severity: '中',
+                location: { lat: 39.64058, lng: -86.08891 }
+            },
+            {
+                id: 'congestion',
+                name: '施工拥堵',
+                description: 'US-31 N 方向施工，平均延迟约 12 分钟',
+                severity: '中',
+                location: { lat: 39.6162, lng: -86.1105 }
+            }
+        ];
+
+        const TRUCK_MAX_SPEED_MPH = 65;
+        const TRUCK_DRIVING_HOURS_PER_DAY = 12;
+        const TRUCK_DAILY_DISTANCE_MI = TRUCK_MAX_SPEED_MPH * TRUCK_DRIVING_HOURS_PER_DAY; // 780 mi
+
+        function milesFromMeters(meters) {
+            if (typeof meters !== 'number') return null;
+            return meters / 1609.344;
+        }
+
+        function formatMiles(miles) {
+            if (typeof miles !== 'number' || !isFinite(miles)) return '--';
+            if (miles >= 100) return `${Math.round(miles).toLocaleString()} mi`;
+            return `${miles.toFixed(1)} mi`;
+        }
+
+        function formatLocalDateTime(date) {
+            if (!(date instanceof Date) || isNaN(date)) return '--';
+            return date.toLocaleString(undefined, {
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        function computeCustomEta(distanceMeters) {
+            if (typeof distanceMeters !== 'number' || distanceMeters <= 0) return null;
+            const distanceMiles = milesFromMeters(distanceMeters);
+            if (!distanceMiles) return null;
+            const fullDrivingDays = Math.floor(distanceMiles / TRUCK_DAILY_DISTANCE_MI);
+            const remainingMiles = distanceMiles - fullDrivingDays * TRUCK_DAILY_DISTANCE_MI;
+            const remainingDrivingHours = remainingMiles > 0 ? remainingMiles / TRUCK_MAX_SPEED_MPH : 0;
+            const totalHours = fullDrivingDays * 24 + remainingDrivingHours;
+            const etaDate = new Date(Date.now() + totalHours * 60 * 60 * 1000);
+            return { distanceMiles, etaDate };
+        }
+        
+        /**
+         * 打开卫星路线子窗口。
+         * @param {{lat:number,lng:number}} origin
+         */
+        function openRouteModal(origin) {
+            if (!routeModal || !origin) return;
+            showRouteLoading('正在匹配最优卡车路线...');
+            if (routeOriginLabel) {
+                routeOriginLabel.textContent = `起点坐标：${origin.lat.toFixed(5)}, ${origin.lng.toFixed(5)}`;
+            }
+            routeModal.classList.remove('hidden');
+            document.body.classList.add('overflow-hidden');
+            ensureRouteMap(origin);
+            setTimeout(() => {
+                if (routeMap) {
+                    google.maps.event.trigger(routeMap, 'resize');
+                }
+            }, 50);
+            renderRouteForOrigin(origin);
+        }
+
+        /**
+         * 关闭卫星路线子窗口。
+         */
+        function closeRouteModal() {
+            if (!routeModal) return;
+            routeModal.classList.add('hidden');
+            hideRouteLoading();
+            routeTrafficLayer?.setMap(null);
+            document.body.classList.remove('overflow-hidden');
+        }
+
+        function showRouteLoading(message) {
+            if (!routeLoading) return;
+            if (message && routeLoadingMessage) {
+                routeLoadingMessage.textContent = message;
+            }
+            routeLoading.classList.remove('hidden');
+        }
+
+        function hideRouteLoading() {
+            routeLoading?.classList.add('hidden');
+        }
+
+        routeCloseButton?.addEventListener('click', closeRouteModal);
+        routeModal?.addEventListener('click', (event) => {
+            if (event.target === routeModal) {
+                closeRouteModal();
+            }
+        });
+
+        function ensureRouteMap(origin) {
+            if (!routeMapContainer || typeof google === 'undefined') return;
+            if (!routeMap) {
+                routeMap = new google.maps.Map(routeMapContainer, {
+                    center: origin,
+                    zoom: 7,
+                    mapTypeId: google.maps.MapTypeId.HYBRID,
+                    streetViewControl: false,
+                    mapTypeControl: false,
+                    fullscreenControl: false,
+                });
+                routeDirectionsService = new google.maps.DirectionsService();
+                routeDirectionsRenderer = new google.maps.DirectionsRenderer({
+                    map: routeMap,
+                    suppressMarkers: true,
+                    polylineOptions: {
+                        strokeColor: '#3b82f6',
+                        strokeWeight: 6,
+                        strokeOpacity: 0.85
+                    }
+                });
+            } else {
+                routeMap.setCenter(origin);
+                routeMap.setZoom(7);
+            }
+            if (!routeTrafficLayer) {
+                routeTrafficLayer = new google.maps.TrafficLayer();
+            }
+            routeTrafficLayer.setMap(routeMap);
+        }
+
+        function updateRouteInsights(directionsResult) {
+            if (!routeEtaDisplay) return;
+            const leg = directionsResult?.routes?.[0]?.legs?.[0];
+            if (!leg) {
+                routeEtaDisplay.textContent = '无法计算里程，请检查坐标。';
+                return;
+            }
+            const customEta = computeCustomEta(leg.distance?.value);
+            const distanceLabel = customEta ? formatMiles(customEta.distanceMiles) : (leg.distance?.text || '--');
+            const etaLabel = customEta ? formatLocalDateTime(customEta.etaDate) : formatLocalDateTime(new Date(Date.now() + (leg.duration_in_traffic?.value || leg.duration?.value || 0) * 1000));
+            routeEtaDisplay.textContent = `距离 ${distanceLabel} · 预计到达(本地) ${etaLabel}`;
+        }
+
+        function clearRouteAlerts() {
+            routeAlertMarkers.forEach(marker => marker.setMap(null));
+            routeAlertMarkers = [];
+        }
+
+        function updateRouteRestrictionsList(alerts = ROUTE_ALERTS) {
+            if (!routeRestrictionsList) return;
+            if (!alerts || alerts.length === 0) {
+                routeRestrictionsList.innerHTML = '<li class="bg-green-900 border border-green-600 text-green-200">未检测到限制路段</li>';
+                return;
+            }
+            routeRestrictionsList.innerHTML = '';
+            alerts.forEach(alert => {
+                const item = document.createElement('li');
+                item.textContent = `${alert.name} · ${alert.description}`;
+                routeRestrictionsList.appendChild(item);
+            });
+        }
+
+        function renderRouteAlerts() {
+            if (!routeMap || typeof google === 'undefined') return;
+            clearRouteAlerts();
+            ROUTE_ALERTS.forEach(alert => {
+                const marker = new google.maps.Marker({
+                    position: alert.location,
+                    map: routeMap,
+                    icon: {
+                        path: google.maps.SymbolPath.CIRCLE,
+                        scale: 7,
+                        fillColor: alert.severity === '高' ? '#f87171' : '#facc15',
+                        fillOpacity: 0.9,
+                        strokeWeight: 1,
+                        strokeColor: '#1e1b4b'
+                    },
+                    title: `${alert.name} (${alert.description})`
+                });
+                const info = new google.maps.InfoWindow({
+                    content: `<strong>${alert.name}</strong><br>${alert.description}`
+                });
+                marker.addListener('click', () => info.open({ map: routeMap, anchor: marker }));
+                routeAlertMarkers.push(marker);
+            });
+            updateRouteRestrictionsList();
+        }
+
+        async function renderRouteForOrigin(origin) {
+            if (!routeDirectionsService || !routeDirectionsRenderer) {
+                ensureRouteMap(origin);
+            }
+            if (!routeDirectionsService) return;
+            showRouteLoading('正在规划卡车路线并加载交通流量...');
+            const request = {
+                origin,
+                destination: ROUTE_DESTINATION_ADDRESS,
+                travelMode: google.maps.TravelMode.DRIVING,
+                provideRouteAlternatives: false,
+                drivingOptions: {
+                    departureTime: new Date(Date.now() + 1 * 60 * 1000),
+                    trafficModel: google.maps.TrafficModel.BEST_GUESS
+                },
+                avoidFerries: true
+            };
+            try {
+                const response = await requestDirectionsPromise(request);
+                routeDirectionsRenderer.setDirections(response);
+                renderRouteAlerts();
+                updateRouteInsights(response);
+                addRouteEndpoints(origin);
+                hideRouteLoading();
+            } catch (error) {
+                console.error('加载卡车路线失败:', error);
+                showRouteLoading('无法加载路线，请稍后重试或检查 Google Maps API Key。');
+            }
+        }
+
+        function requestDirectionsPromise(request) {
+            return new Promise((resolve, reject) => {
+                routeDirectionsService.route(request, (result, status) => {
+                    if (status === 'OK') {
+                        resolve(result);
+                    } else {
+                        reject(new Error(status));
+                    }
+                });
+            });
+        }
+
+        function addRouteEndpoints(origin) {
+            if (!routeMap) return;
+            routeEndpointMarkers.forEach(marker => marker.setMap(null));
+            routeEndpointMarkers = [];
+            const destinationGeocoder = new google.maps.Geocoder();
+            const originMarker = new google.maps.Marker({
+                position: origin,
+                map: routeMap,
+                title: '当前位置',
+                icon: {
+                    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                    scale: 5,
+                    fillColor: '#34d399',
+                    fillOpacity: 1,
+                    strokeWeight: 1,
+                    strokeColor: '#0f172a'
+                }
+            });
+            routeEndpointMarkers.push(originMarker);
+            destinationGeocoder.geocode({ address: ROUTE_DESTINATION_ADDRESS }, (results, status) => {
+                if (status === 'OK' && results[0]) {
+                    const destMarker = new google.maps.Marker({
+                        position: results[0].geometry.location,
+                        map: routeMap,
+                        title: '目的地',
+                        icon: {
+                            path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
+                            scale: 5,
+                            fillColor: '#f97316',
+                            fillOpacity: 1,
+                            strokeWeight: 1,
+                            strokeColor: '#0f172a'
+                        }
+                    });
+                    routeEndpointMarkers.push(destMarker);
+                }
+            });
+        }
+
+
+        /**
+         * 从 localStorage 读取 /getTracks 的缓存。
+         * @returns {Array|null} 缓存的 track 列表
+         */
+        function getCachedTracks() {
+            debugLog(`Cache Read: Attempting to get tracks from key '${TRACKS_CACHE_KEY}'.`);
+            if (typeof localStorage === 'undefined') return null;
+            try {
+                const cached = localStorage.getItem(TRACKS_CACHE_KEY);
+                if (!cached) {
+                    debugLog(`Cache Read Miss: Key '${TRACKS_CACHE_KEY}' not found.`);
+                    return null;
+                }
+                const parsed = JSON.parse(cached);
+                if (!parsed || !Array.isArray(parsed.data)) {
+                    debugLog(`Cache Read Invalid: Data for key '${TRACKS_CACHE_KEY}' is malformed.`);
+                    return null;
+                }
+                if (Date.now() - parsed.timestamp > TRACKS_CACHE_EXPIRATION_MS) {
+                    debugLog(`Cache Read Expired: Key '${TRACKS_CACHE_KEY}' is stale.`);
+                    return null;
+                }
+                debugLog(`Cache Read Hit: Found ${parsed.data.length} tracks for key '${TRACKS_CACHE_KEY}'.`);
+                return parsed.data;
+            } catch (error) {
+                debugLog(`Cache Read Error: Failed for key '${TRACKS_CACHE_KEY}'. Error: ${error.message}`);
+                console.warn('读取货车列表缓存失败:', error);
+                return null;
+            }
+        }
+
+        /**
+         * 从 localStorage 读取单页轨迹缓存。
+         * @param {string} trackId
+         * @param {number} page
+         * @returns {Array|null}
+         */
+        function readGpsPageCache(trackId, page) {
+            const key = `${GPS_TRACE_CACHE_PREFIX}${trackId}_page_${page}`;
+            debugLog(`Cache Read: Attempting to get GPS page from key '${key}'.`);
+            if (typeof localStorage === 'undefined' || !trackId) return null;
+            try {
+                const raw = localStorage.getItem(key);
+                if (!raw) {
+                    debugLog(`Cache Read Miss: Key '${key}' not found.`);
+                    return null;
+                }
+                const cache = JSON.parse(raw);
+                if (!cache || !Array.isArray(cache.data)) {
+                    debugLog(`Cache Read Invalid: Data for key '${key}' is malformed.`);
+                    return null;
+                }
+                if (Date.now() - cache.timestamp > GPS_PAGE_CACHE_EXPIRATION_MS) {
+                    debugLog(`Cache Read Expired: Key '${key}' is stale.`);
+                    localStorage.removeItem(key);
+                    return null;
+                }
+                debugLog(`Cache Read Hit: Found ${cache.data.length} points in key '${key}'.`);
+                return cache.data;
+            } catch (error) {
+                debugLog(`Cache Read Error: Failed for key '${key}'. Error: ${error.message}`);
+                console.warn(`读取轨迹分页缓存失败 for track ${trackId} page ${page}:`, error);
+                return null;
+            }
+        }
+
+        /**
+         * 写入单页轨迹缓存。
+         * @param {string} trackId
+         * @param {number} page
+         * @param {Array<Object>} points
+         */
+        function writeGpsPageCache(trackId, page, points) {
+            const key = `${GPS_TRACE_CACHE_PREFIX}${trackId}_page_${page}`;
+            debugLog(`Cache Write: Setting ${points.length} points for key '${key}'.`);
+            if (typeof localStorage === 'undefined' || !trackId) return;
+            if (!Array.isArray(points)) return;
+            try {
+                localStorage.setItem(key, JSON.stringify({
+                    timestamp: Date.now(),
+                    data: points
+                }));
+            } catch (error) {
+                debugLog(`Cache Write Error: Failed for key '${key}'. Error: ${error.message}`);
+                console.warn(`保存轨迹分页缓存失败 for track ${trackId} page ${page}:`, error);
+            }
+        }
+
+        /**
+         * 将最新 /getTracks 结果写入 localStorage。
+         * @param {Array} tracks - 货车列表
+         */
+        function setCachedTracks(tracks) {
+            debugLog(`Cache Write: Setting ${tracks.length} tracks for key '${TRACKS_CACHE_KEY}'.`);
+            if (typeof localStorage === 'undefined') return;
+            if (!Array.isArray(tracks)) return;
+            try {
+                localStorage.setItem(TRACKS_CACHE_KEY, JSON.stringify({
+                    timestamp: Date.now(),
+                    data: tracks
+                }));
+            } catch (error) {
+                debugLog(`Cache Write Error: Failed for key '${TRACKS_CACHE_KEY}'. Error: ${error.message}`);
+                console.warn('保存货车列表缓存失败:', error);
+            }
+        }
+
+        /**
+         * 格式化 Unix 时间戳 (毫秒) 为 "月/日 时:分" (MM/DD HH:mm) 格式。
+         * @param {number | string | null} timestamp - 毫秒级 Unix 时间戳。
+         * @returns {string} 格式化后的时间字符串。
+         */
+        function formatTime(timestamp) {
+            if (!timestamp) return '时间未知';
+            const date = new Date(Number(timestamp)); 
+            if (isNaN(date)) return '时间无效';
+            
+            // 辅助函数，确保数字始终有两位，不足两位时在前面补零
+            const padZero = (num) => num.toString().padStart(2, '0');
+
+            const month = padZero(date.getMonth() + 1);
+            const day = padZero(date.getDate());
+            const hours = padZero(date.getHours());
+            const minutes = padZero(date.getMinutes());
+            
+            // 返回 MM/DD HH:mm 格式
+            return `${month}/${day} ${hours}:${minutes}`; 
+        }
+
+        /**
+         * 清除地图上的所有轨迹和标记。
+         */
+        function clearMapLayers() {
+            Object.values(recordingTrackTimers).forEach(timerId => clearInterval(timerId));
+            recordingTrackTimers = {};
+            polylineLayer.forEach(p => p.setMap(null));
+            markerLayer.forEach(m => m.setMap(null));
+            polylineLayer = [];
+            markerLayer = [];
+            trackOverlayMap = {};
+        }
+        
+        /**
+         * 将一组点纳入地图边界。
+         * @param {google.maps.LatLngBounds} bounds 
+         * @param {Array<Object>} points 
+         */
+        function extendBoundsWithPoints(bounds, points) {
+            if (!bounds || !Array.isArray(points) || typeof google === 'undefined' || !google.maps) return;
+            points.forEach(point => {
+                if (!point) return;
+                const lat = Number(point.lat);
+                const lng = Number(point.lng);
+                if (!isNaN(lat) && !isNaN(lng)) {
+                    bounds.extend(new google.maps.LatLng(lat, lng));
+                }
+            });
+        }
+        
+        /**
+         * 停止指定 recording 轨迹的轮询。
+         * @param {string} trackId 
+         */
+        function stopRecordingWatcher(trackId) {
+            debugLog(`stopRecordingWatcher clear interval and delete timer ${recordingTrackTimers[trackId]}`);
+            delete renderingQueue[trackId]; // 清理渲染队列
+            if (recordingTrackTimers[trackId]) {
+                clearInterval(recordingTrackTimers[trackId]);
+                delete recordingTrackTimers[trackId];
+            }
+        }
+
+        /**
+         * 获取轨迹点列表中的最新速度。
+         * @param {Array<Object>} points 
+         * @returns {number|null}
+         */
+        function getLatestSpeed(points) {
+            if (!Array.isArray(points) || points.length === 0) return null;
+            for (let i = points.length - 1; i >= 0; i--) {
+                const speed = points[i]?.speed;
+                if (typeof speed === 'number' && !isNaN(speed)) {
+                    return speed;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * 获取轨迹点列表中的最新时间戳。
+         * @param {Array<Object>} points
+         * @returns {number|null}
+         */
+        function getLatestTimestamp(points) {
+            if (!Array.isArray(points) || points.length === 0) return null;
+            for (let i = points.length - 1; i >= 0; i--) {
+                const timestamp = points[i]?.timestamp ?? points[i]?.ts;
+                if (timestamp) {
+                    const numeric = Number(timestamp);
+                    if (!isNaN(numeric)) {
+                        return numeric;
+                    }
+                }
+            }
+            return null;
+        }
+
+        /**
+         * 为 recording 状态的轨迹启动轮询刷新。
+         * 在此函数中，从服务器获取的新轨迹点会先被添加到 `recordingTrackPartialBuffers`。
+         * 当缓冲区中的数据量满一个页面（GPS_PAGE_SIZE）时，它将被写入缓存。
+         * 地图上的轨迹线会实时更新，以提供即时反馈。
+         * @param {string} trackId 
+         */
+        function startRecordingWatcher(trackId) {
+            if (recordingTrackTimers[trackId]) return;
+
+            // 使用一个闭包变量来持续追踪此轨迹已获取的总点数
+            let totalKnownPoints;
+
+            debugLog(`startRecordingWatcher for track:${trackId}`);
+            const poll = async () => {
+                const overlay = trackOverlayMap[trackId];
+                if (!overlay || mapView.classList.contains('hidden')) {
+                    debugLog(`stopRecordingWatcher for track:${trackId} reason: overlay:${overlay} hidden:${mapView.classList.contains('hidden')}`)
+                    stopRecordingWatcher(trackId);
+                    return;
+                }
+
+                // 首次轮询时，初始化 totalKnownPoints
+                // 它等于线段上已有的点数（来自 loadTrackWithStreaming）
+                if (totalKnownPoints === undefined) {
+                    totalKnownPoints = overlay.pointsCount || 0;
+                }
+                
+                // 获取或创建缓冲区。它可能已由 loadTrackWithStreaming 创建并包含数据
+                if (!recordingTrackPartialBuffers[trackId]) {
+                    const initialPageCount = Math.floor((overlay.pointsCount || 0) / GPS_PAGE_SIZE);
+                    const pointsInLastPage = (overlay.pointsCount || 0) % GPS_PAGE_SIZE;
+                    let backfillPoints = [];
+
+                    if (pointsInLastPage > 0) {
+                        debugLog(`Backfilling buffer for track ${trackId} with ${pointsInLastPage} points.`);
+                        const existingPath = overlay.polyline.getPath().getArray();
+                        const pointsToBackfill = existingPath.slice(existingPath.length - pointsInLastPage);
+                        // 将 google.maps.LatLng 对象转换为缓存需要的格式。
+                        // 注意：速度和时间戳信息会丢失，但这样做可以保证轨迹点位置的缓存完整性。
+                        backfillPoints = pointsToBackfill.map(p => ({ lat: p.lat(), lng: p.lng(), timestamp: null, speed: null }));
+                    }
+
+                    recordingTrackPartialBuffers[trackId] = {
+                        points: backfillPoints,
+                        targetPage: initialPageCount + 1
+                    };
+                }
+                const buffer = recordingTrackPartialBuffers[trackId];
+                
+                // 从我们知道的最后一个点开始请求
+                let skip = totalKnownPoints;
+                let keepPollingPage = true;
+                const newPointsAccumulator = [];
+
+                while (keepPollingPage) {
+                    try {
+                        const payload = { trackId, skip, pagesize: GPS_PAGE_SIZE };
+                        const response = await authenticatedFetch(TRACE_POINTS_API_URL, {
+                            method: 'POST',
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (!response.ok) throw new Error(`HTTP 错误: ${response.status}`);
+                        
+                        const jsonResponse = await response.json();
+                        if (jsonResponse.code !== 0 || !Array.isArray(jsonResponse.data)) {
+                            throw new Error(`API 返回数据格式错误: ${jsonResponse.message || ''}`);
+                        }
+
+                        const newPoints = jsonResponse.data.map(p => ({
+                            lat: p.lat,
+                            lng: p.lng,
+                            timestamp: p.ts,
+                            speed: typeof p.speed === 'number' ? p.speed : null
+                        }));
+
+                        if (newPoints.length > 0) {
+                            newPointsAccumulator.push(...newPoints);
+
+                            // 将新获取的点添加到缓冲区，并推入平滑渲染队列
+                            if (!renderingQueue[trackId]) {
+                                renderingQueue[trackId] = { points: [], timeToRenderMs: 0 };
+                            }
+                            const pointsToRender = newPoints.map(p => ({ lat: p.lat, lng: p.lng }));
+                            renderingQueue[trackId].points.push(...pointsToRender);
+
+                            // 计算渲染总时间 = 新加载点的流逝时间
+                            const firstPointTs = newPoints[0]?.timestamp;
+                            const lastPointTs = newPoints[newPoints.length - 1]?.timestamp;
+
+                            let elapsedTime = 0;
+                            if (firstPointTs && lastPointTs && lastPointTs > firstPointTs) {
+                                elapsedTime = lastPointTs - firstPointTs;
+                            }
+                            // 将流逝时间赋给 timeToRenderMs，让渲染循环去处理
+                            renderingQueue[trackId].timeToRenderMs += elapsedTime;
+                            debugLog(`Queued ${newPoints.length} points for smooth rendering over ${elapsedTime}ms.`);
+                        }
+
+                        if (newPoints.length < GPS_PAGE_SIZE) {
+                            keepPollingPage = false;
+                        } else {
+                            // 为同一次轮询中的下一次分页请求更新 skip 值
+                            skip += newPoints.length;
+                        }
+
+                    } catch (error) {
+                        console.error(`轮询轨迹 ${trackId} 失败:`, error);
+                        keepPollingPage = false; // 出错时停止本次轮询
+                    }
+                }
+
+                // 如果没有新点，则结束本次轮询
+                if (newPointsAccumulator.length === 0) {
+                    return;
+                }
+
+                // 如果这是占位符覆盖物的第一个点批次，
+                // 我们需要正确地初始化标记。
+                if (overlay.pointsCount === 0) {
+                    debugLog(`正在为占位符轨迹 ${trackId} 初始化标记。`);
+                    const firstPoint = newPointsAccumulator[0];
+                    const firstPosition = new google.maps.LatLng(firstPoint.lat, firstPoint.lng);
+                    
+                    overlay.startMarker.setPosition(firstPosition);
+                    overlay.startMarker.setIcon(buildStartMarkerIcon(overlay.color));
+                    overlay.startMarker.setTitle(`轨迹起点: ${trackId}`);
+                    overlay.startMarker.setVisible(true);
+
+                    // 结束标记将在下面完全配置，但我们现在必须使其可见。
+                    overlay.endMarker.setVisible(true);
+                }
+
+                // 更新总点数计数器，并立即更新 overlay 的点数以反映收到的总数
+                totalKnownPoints += newPointsAccumulator.length;
+                overlay.pointsCount = totalKnownPoints;
+                
+                buffer.points.push(...newPointsAccumulator);
+                debugLog(`Track ${trackId} watcher: Added ${newPointsAccumulator.length} new points. Buffer now has ${buffer.points.length} points.`);
+
+                // 检查缓冲区是否已满，如果满了就写入缓存
+                while (buffer.points.length >= GPS_PAGE_SIZE) {
+                    const pageToWrite = buffer.points.splice(0, GPS_PAGE_SIZE);
+                    
+                    debugLog(`Track ${trackId} watcher: Buffer full. Writing page ${buffer.targetPage} to cache.`);
+                    writeGpsPageCache(trackId, buffer.targetPage, pageToWrite);
+                    
+                    // 为下一次缓存写入更新页码
+                    buffer.targetPage++;                    
+                }
+                
+                // 使用最新获取的点来更新末端标记
+                const lastPoint = newPointsAccumulator[newPointsAccumulator.length - 1];
+                if (lastPoint) {
+                    const lastPosition = new google.maps.LatLng(lastPoint.lat, lastPoint.lng);
+                    overlay.endMarker.setPosition(lastPosition);
+
+                    const latestTimestamp = getLatestTimestamp(newPointsAccumulator);
+                    const latestSpeed = getLatestSpeed(newPointsAccumulator);
+
+                    if (latestTimestamp) overlay.latestTimestamp = latestTimestamp;
+                    if (latestSpeed !== null) overlay.speed = latestSpeed;
+                    
+                    overlay.endMarker.setIcon(buildEndMarkerIcon({
+                        color: overlay.color,
+                        isLatest: overlay.isLatest,
+                        huoyunId: overlay.huoyunId,
+                        speed: overlay.speed,
+                        status: overlay.status,
+                        latestTimestamp: overlay.latestTimestamp
+                    }));
+
+                    attachRouteClick(overlay.endMarker, lastPosition.toJSON());
+                }
+            };
+
+            recordingTrackTimers[trackId] = setInterval(poll, RECORDING_POLL_INTERVAL_MS);
+        }
+
+        /**
+         * 切换视图 (矩阵或地图)。
+         * @param {string} viewName - 'matrix' 或 'map'。
+         */
+        function switchView(viewName) {
+            if (viewName === 'matrix') {
+                matrixView.classList.remove('hidden');
+                mapView.classList.add('hidden');
+                backButton.classList.add('hidden');
+                currentIdDisplay.textContent = '无';
+                loadingStatusArea.textContent = '';
+                traceStateElement.textContent = '未加载';
+                gpsButton.disabled = true; // 切换回矩阵时禁用
+                currentHuoyunId = null; // 清除当前 ID
+                clearMapLayers(); // 切换到矩阵时清除地图
+                closeShipmentOverlay(); // 关闭货运信息 overlay
+                closeRouteModal(); // 关闭卫星路线窗口
+                // 重新加载货车状态概览 (矩阵)
+                generateMatrix(); 
+            } else if (viewName === 'map') {
+                matrixView.classList.add('hidden');
+                mapView.classList.remove('hidden');
+                backButton.classList.remove('hidden');
+                gpsButton.disabled = false; // 切换到地图时启用加载按钮
+                
+                // 确保在地图视图切换时，地图大小正确调整
+                if (map) {
+                    google.maps.event.trigger(map, 'resize');
+                }
+            }
+        }
+
+        /**
+         * 初始化 Google Map 并设置图层和控件。
+         * 此函数仅由 Google Maps API 的 callback 机制调用一次。
+         */
+        window.initMap = function() {
+            if (typeof google === 'undefined' || typeof google.maps === 'undefined') {
+                console.error("Google Maps API 未加载。");
+                return;
+            }
+
+            // 1. 初始化地图和矩阵
+            map = new google.maps.Map(document.getElementById('map'), {
+                zoom: 10,
+                center: defaultCenter,
+                mapTypeId: google.maps.MapTypeId.ROADMAP, 
+                mapTypeControl: false,
+                streetViewControl: false,
+                fullscreenControl: true
+            });
+            
+            // 初始化矩阵视图和初始视图
+            // generateMatrix(); // 初始加载在 onAuthStateChanged 中处理，这里只确保视图设置正确
+            switchView('matrix');
+            startRenderingLoop();
+
+
+            // --- 货车限制可视化 (模拟) ---
+            const restrictionCoords = [
+                { lat: 37.75, lng: -122.42 },
+                { lat: 37.75, lng: -122.38 },
+                { lat: 37.80, lng: -122.38 },
+                { lat: 37.80, lng: -122.42 }
+            ];
+            restrictionPolygon = new google.maps.Polygon({
+                paths: restrictionCoords,
+                strokeColor: '#dc2626', 
+                strokeOpacity: 0.7,
+                strokeWeight: 2,
+                fillColor: '#dc2626',
+                fillOpacity: 0.15,
+                map: null 
+            });
+
+            // --- 事件监听器 ---
+            
+            // 重新加载按钮的事件监听器
+            // 矩阵视图中没有这个按钮，它只在地图视图中用于重新加载轨迹
+            gpsButton.addEventListener('click', () => {
+                // 如果当前在地图视图，重新加载轨迹
+                if (currentHuoyunId && mapView && !mapView.classList.contains('hidden')) {
+                    loadAllTracesForHuoyun(currentHuoyunId);
+                } 
+                // 如果当前在矩阵视图，重新加载矩阵
+                else if (matrixView && !matrixView.classList.contains('hidden')) {
+                    generateMatrix(true);
+                }
+            });
+
+
+            // 返回矩阵按钮
+            backButton.addEventListener('click', () => {
+                switchView('matrix');
+            });
+
+            // 为矩阵重新加载按钮添加事件监听器
+            document.getElementById('matrix-reload-btn').addEventListener('click', () => generateMatrix(true));
+
+            // 图层开关
+            document.getElementById('traffic-toggle').addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    if (!trafficLayer) {
+                        trafficLayer = new google.maps.TrafficLayer();
+                    }
+                    trafficLayer.setMap(map);
+                } else {
+                    if (trafficLayer) {
+                        trafficLayer.setMap(null);
+                    }
+                }
+            });
+            document.getElementById('satellite-toggle').addEventListener('change', (e) => {
+                map.setMapTypeId(e.target.checked ? google.maps.MapTypeId.SATELLITE : google.maps.MapTypeId.ROADMAP);
+            });
+            document.getElementById('restriction-toggle').addEventListener('change', (e) => {
+                restrictionPolygon.setMap(e.target.checked ? map : null);
+            });
+
+            // 初始化默认图层
+            if (document.getElementById('traffic-toggle').checked) {
+                trafficLayer = new google.maps.TrafficLayer();
+                trafficLayer.setMap(map);
+            }
+
+            // 货运信息 Overlay 关闭按钮事件
+            document.getElementById('shipment-close-btn').addEventListener('click', closeShipmentOverlay);
+            
+            // ESC 键关闭 overlay
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    const overlay = document.getElementById('shipment-overlay');
+                    if (overlay.classList.contains('show')) {
+                        closeShipmentOverlay();
+                    }
+                    if (routeModal && !routeModal.classList.contains('hidden')) {
+                        closeRouteModal();
+                    }
+                }
+            });
+        }
+
+        /**
+         * 从 /getTracks API 加载货车数据，按 huoyunId 分组，存储所有 trackId，并渲染矩阵。
+         * 此函数现在也用于重新加载矩阵。
+         */
+        async function generateMatrix(forceRefresh = false) {
+            gridContainer.innerHTML = '';
+
+
+
+            matrixTitle.textContent = forceRefresh ? '正在刷新货车状态...' : '正在加载货车状态...';
+            // 禁用按钮
+            document.getElementById('matrix-reload-btn')?.setAttribute('disabled', 'true');
+            document.getElementById('matrix-reload-btn')?.classList.add('opacity-50', 'cursor-not-allowed');
+
+            let tracks = [];
+
+            if (!forceRefresh) {
+                const cachedTracks = getCachedTracks();
+                if (cachedTracks && cachedTracks.length > 0) {
+                    tracks = cachedTracks;
+                }
+            }
+
+            let attempt = 0;
+            const maxAttempts = 3;
+
+            if (tracks.length === 0) {
+                while (attempt < maxAttempts) {
+                    try {
+                        const delay = 500 * Math.pow(2, attempt); 
+                        if (attempt > 0) {
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                            matrixTitle.textContent = `正在重试加载货车列表... (第 ${attempt + 1} 次)`;
+                        }
+
+                        const response = await authenticatedFetch(TRACKS_API_URL, {
+                            method: 'GET'
+                        });
+
+                        if (!response.ok) {
+                            throw new Error(`HTTP 错误: ${response.status} ${response.statusText}`);
+                        }
+
+                        const jsonResponse = await response.json();
+                        
+                        if (jsonResponse.code === 0 && Array.isArray(jsonResponse.data)) {
+                            tracks = jsonResponse.data;
+                            setCachedTracks(tracks);
+                            break; 
+                        } else {
+                            throw new Error(`云函数业务错误: ${jsonResponse.message || '未知错误'}`);
+                        }
+
+                    } catch (error) {
+                        attempt++;
+                        console.error(`加载货车列表失败: ${error.message}`);
+                        if (attempt >= maxAttempts) {
+                            matrixTitle.textContent = `加载货车列表失败 (API错误: ${error.message.substring(0, 50)}...)`;
+                            // 在失败时显示详细错误提示
+                            gridContainer.innerHTML = `<p class="text-red-600 p-4 font-bold">API 加载失败，请检查云函数 URL 或 CORS 配置：<br>${error.message}</p>`;
+                            // 启用按钮
+                            document.getElementById('matrix-reload-btn')?.removeAttribute('disabled');
+                            document.getElementById('matrix-reload-btn')?.classList.remove('opacity-50', 'cursor-not-allowed');
+                            return;
+                        }
+                    }
+                }
+            } else {
+                matrixTitle.textContent = `已从缓存加载货车状态 (${tracks.length} 条原始轨迹)`;
+            }
+
+            // --- 核心逻辑：按 huoyunId 分组并存储所有 trackId ---
+            huoyunTrackData = {};
+
+            tracks.forEach(track => {
+                // 修正：清除 huoyunId 前后空白，确保 ID 一致性
+                const huoyunId = track.huoyunId ? String(track.huoyunId).trim() : null; 
+                
+                // API 返回的 trackId 是 _id 字段
+                const trackId = track._id; 
+                // startTime 用于判断哪个 trackId 最“新”
+                const startTime = track.startTime || 0; 
+                
+                if (!trackId || !huoyunId) return; // 移除无效或空白 ID
+
+                if (!huoyunTrackData[huoyunId]) {
+                    huoyunTrackData[huoyunId] = {
+                        tracks: [],
+                        latestTrackId: null,
+                        latestStartTime: 0
+                    };
+                }
+
+                huoyunTrackData[huoyunId].tracks.push({
+                    _id: trackId,
+                    startTime: startTime,
+                    status: (track.status || '').toLowerCase(),
+                    huoyunId: huoyunId
+                });
+
+                // 更新最新轨迹 ID 和时间
+                if (startTime > huoyunTrackData[huoyunId].latestStartTime) {
+                    huoyunTrackData[huoyunId].latestStartTime = startTime;
+                    huoyunTrackData[huoyunId].latestTrackId = trackId;
+                }
+            });
+            
+            // 整理数据，按 startTime 降序排序 tracks 列表
+            const uniqueHuoyunIds = Object.keys(huoyunTrackData); 
+            
+            uniqueHuoyunIds.forEach(huoyunId => {
+                huoyunTrackData[huoyunId].tracks.sort((a, b) => b.startTime - a.startTime);
+            });
+            
+            const huoyunIdsToDisplay = uniqueHuoyunIds.slice(0, 200); // 限制展示数量
+            
+            gridContainer.innerHTML = '';
+
+            if (huoyunIdsToDisplay.length === 0) {
+                gridContainer.innerHTML = '<p class="text-gray-500 p-4">未从 API 获取到任何唯一的货运单号数据。</p>';
+                matrixTitle.textContent = '货车状态概览 (共 0 辆)';
+                // 启用按钮
+                document.getElementById('matrix-reload-btn')?.removeAttribute('disabled');
+                document.getElementById('matrix-reload-btn')?.classList.remove('opacity-50', 'cursor-not-allowed');
+                return;
+            }
+
+            // 渲染矩阵单元格 (只显示唯一的 huoyunId)
+            huoyunIdsToDisplay.forEach((huoyunId, index) => {
+                const data = huoyunTrackData[huoyunId];
+                
+                // 获取并格式化最新的开始时间
+                const latestStartTime = data.latestStartTime; 
+                const formattedTime = formatTime(latestStartTime); 
+
+                // 忽略 API 状态，循环分配五种详细状态
+                const statusIndex = index % DETAILED_STATUSES.length;
+                const frontendStatus = DETAILED_STATUSES[statusIndex];
+                
+                const cell = document.createElement('div');
+                // 启用 relative 定位，使 status badge 可以使用 absolute 定位
+                cell.className = `matrix-cell ${frontendStatus.class} relative`; 
+                cell.setAttribute('data-huoyun-id', huoyunId);
+                cell.innerHTML = `
+                    <!-- 状态显示在右上角 (Absolute position: top right) -->
+                    <span class="absolute top-1 right-1 text-xs font-semibold px-2 py-0.5 rounded-md bg-white text-gray-800 shadow-md transform scale-90 origin-top-right">
+                        ${frontendStatus.name}
+                    </span>
+                    
+                    <!-- 居中内容，通过 mt-4 避免与右上角标签重叠 -->
+                    <span class="text-base font-bold truncate max-w-full mt-4">${huoyunId}</span>
+                    <!-- 格式化后的时间：月/日 时:分 -->
+                    <span class="text-xs font-normal opacity-70 mt-1">出发: ${formattedTime}</span>
+                    <span class="text-xs font-normal opacity-60">(共 ${data.tracks.length} 轨迹)</span>
+                `;
+                
+                cell.addEventListener('click', function() {
+                    handleMatrixClick(huoyunId); // 传递 huoyunId
+                });
+
+                gridContainer.appendChild(cell);
+            });
+
+            matrixTitle.textContent = `货车状态概览 (共 ${huoyunIdsToDisplay.length} 辆)`; // 修正为“共”
+            // 启用按钮
+            document.getElementById('matrix-reload-btn')?.removeAttribute('disabled');
+            document.getElementById('matrix-reload-btn')?.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+
+        /**
+         * 处理矩阵单元格点击事件，并触发加载该货运单下的所有轨迹。
+         * @param {string} huoyunId - 被点击货运的 ID。
+         */
+        function handleMatrixClick(huoyunId) {
+            const trackData = huoyunTrackData[huoyunId];
+            if (!trackData || trackData.tracks.length === 0) {
+                console.error(`Error: Could not find track data for huoyunId ${huoyunId}`);
+                traceStateElement.textContent = `错误：找不到货运单号 ${huoyunId} 的任何轨迹数据。`;
+                return;
+            }
+
+            // 1. 设置当前 ID，并切换到地图视图
+            currentHuoyunId = huoyunId;
+            switchView('map');
+            
+            // 2. 更新控制面板 ID
+            currentIdDisplay.textContent = `${huoyunId} (共 ${trackData.tracks.length} 条轨迹)`;
+            
+            // 3. 加载货运详细信息（将 huoyunId 作为货运号查询）
+            loadShipmentInfo(huoyunId);
+            
+            // 4. 加载所有轨迹
+            loadAllTracesForHuoyun(huoyunId);
+        }
+
+        /**
+         * 从 Google Sheets 获取货运详细信息
+         * @param {string} shipmentNumber - 货运号（使用 huoyunId 作为货运号）
+         * @returns {Promise<Object|undefined>} 货运数据对象
+         */
+        async function fetchShipmentData(shipmentNumber) {
+            const normalizedQuery = shipmentNumber.toUpperCase().trim();
+
+            try {
+                // 1. 第一次 API 调用：获取 H 列所有值
+                const indexFetchUrl = `${BASE_SHEET_URL}H:H&format=matrix`;
+                
+                const indexResponse = await fetch(indexFetchUrl, {
+                    headers: { 'x-proxy-secret': PROXY_SECRET }
+                });
+
+                if (!indexResponse.ok) {
+                    throw new Error(`索引 API 请求失败，状态码: ${indexResponse.status}`);
+                }
+                
+                const indexResult = await indexResponse.json();
+                
+                if (!indexResult.ok || !indexResult.values) {
+                    throw new Error('接收到无效的索引数据结构。');
+                }
+
+                const hColumn = indexResult.values;
+                let targetRowIndex = -1;
+                
+                // 从索引 1 开始搜索（跳过表头）
+                for (let i = 1; i < hColumn.length; i++) {
+                    const value = (hColumn[i][0] || '').toUpperCase().trim();
+                    if (value === normalizedQuery) {
+                        targetRowIndex = i + 1;
+                        break;
+                    }
+                }
+
+                if (targetRowIndex === -1) {
+                    return undefined; // 未找到匹配项
+                }
+
+                // 2. 第二次 API 调用：获取特定行的数据
+                const dataFetchUrl = `${BASE_SHEET_URL}A${targetRowIndex}:O${targetRowIndex}&format=matrix`;
+                const dataResponse = await fetch(dataFetchUrl, {
+                    headers: { 'x-proxy-secret': PROXY_SECRET }
+                });
+                
+                if (!dataResponse.ok) {
+                    throw new Error(`数据 API 请求失败，状态码: ${dataResponse.status}`);
+                }
+                
+                const dataResult = await dataResponse.json();
+                
+                if (!dataResult.ok || !dataResult.values || dataResult.values.length === 0) {
+                    throw new Error('接收到无效的行数据结构。');
+                }
+
+                const rowData = dataResult.values[0];
+
+                // 3. 转换行数据为对象格式
+                return {
+                    client: rowData[0] || 'N/A',
+                    description: rowData[1] || 'N/A',
+                    truckType: rowData[2] || 'N/A',
+                    pickupAddress1: rowData[3] || 'N/A',
+                    dropoffAddress1: rowData[4] || 'N/A',
+                    dropoffAddress2: rowData[5] || 'N/A',
+                    pickupNumber: rowData[6] || 'N/A',
+                    shipmentNumber: rowData[7] || 'N/A',
+                    pickupTime1: rowData[8] || 'N/A',
+                    dropoffTime1: rowData[9] || 'N/A',
+                    dropoffTime2: rowData[10] || 'N/A',
+                    carrierCompany: rowData[11] || 'N/A',
+                    vin: rowData[12] || 'N/A',
+                    personInCharge: rowData[13] || 'N/A',
+                    status: rowData[14] || 'N/A',
+                };
+            } catch (error) {
+                console.error('获取货运数据失败:', error);
+                throw error;
+            }
+        }
+
+        /**
+         * 将字符串中的电话和邮箱地址转换为可点击链接。
+         * @param {string} text - 输入文本
+         * @returns {string} - 包含 HTML 链接的文本
+         */
+        function linkifyValue(text) {
+            if (typeof text !== 'string') return text;
+
+            // 正则表达式：匹配邮箱地址
+            const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/gi;
+            // 正则表达式：匹配多种格式的电话号码
+            const phoneRegex = /(\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4})/g;
+
+            let linkedText = text.replace(phoneRegex, (match) => {
+                const phoneNumber = match.replace(/[^\d]/g, ''); // 移除所有非数字字符
+                return `<a href="tel:${phoneNumber}" class="text-blue-600 hover:underline">${match}</a>`;
+            });
+
+            linkedText = linkedText.replace(emailRegex, (match) => {
+                return `<a href="mailto:${match}" class="text-blue-600 hover:underline">${match}</a>`;
+            });
+
+            return linkedText;
+        }
+
+        /**
+         * 加载并显示货运详细信息（在 Overlay 中）
+         * @param {string} huoyunId - 货运单号（作为货运号查询）
+         */
+        async function loadShipmentInfo(huoyunId) {
+            const shipmentOverlay = document.getElementById('shipment-overlay');
+            const shipmentContent = document.getElementById('shipment-info-content');
+            const shipmentLoading = document.getElementById('shipment-loading');
+            const shipmentError = document.getElementById('shipment-error');
+            const shipmentErrorMessage = document.getElementById('shipment-error-message');
+            
+            // 显示 overlay 和加载状态
+            shipmentOverlay.classList.add('show');
+            shipmentLoading.classList.remove('hidden');
+            shipmentContent.classList.add('hidden');
+            shipmentError.classList.add('hidden');
+            
+            try {
+                const shipmentData = await fetchShipmentData(huoyunId);
+                
+                if (!shipmentData) {
+                    // 未找到数据
+                    shipmentLoading.classList.add('hidden');
+                    shipmentError.classList.remove('hidden');
+                    shipmentErrorMessage.textContent = `未找到货运号 ${huoyunId} 的详细信息。`;
+                    return;
+                }
+                
+                // 构造状态标签的样式
+                let statusColor = 'bg-gray-200 text-gray-800';
+                if (shipmentData.status === 'DISPATCHED') {
+                    statusColor = 'bg-blue-100 text-blue-800';
+                } else if (shipmentData.status === 'NEED RATE CON') {
+                    statusColor = 'bg-yellow-100 text-yellow-800';
+                } else if (shipmentData.status === 'PENDING') {
+                    statusColor = 'bg-gray-100 text-gray-500';
+                }
+                
+                // 生成详情内容 HTML
+                const detailHTML = `
+                    <div class="space-y-3">
+                        <!-- 标题和状态 -->
+                        <div class="border-b border-gray-200 pb-2 mb-3">
+                            <div class="flex items-center justify-between mb-2">
+                                <h3 class="text-lg font-bold text-gray-800">${shipmentData.shipmentNumber}</h3>
+                                <span class="px-2 py-1 ${statusColor} text-xs font-bold rounded-full uppercase">
+                                    ${shipmentData.status}
+                                </span>
+                            </div>
+                        </div>
+                        
+                        <!-- 详细信息列表 -->
+                        <div class="space-y-2">
+                            ${Object.keys(SHIPMENT_FIELD_MAP).map(key => {
+                                const enKey = SHIPMENT_FIELD_MAP[key];
+                                // 跳过已在标题显示的字段
+                                if (enKey === 'shipmentNumber' || enKey === 'status') return '';
+                                
+                                // 去除前导和尾随的空格、回车符和换行符
+                                let value = shipmentData[enKey] || 'N/A';
+                                if (typeof value === 'string') {
+                                    // 使用正则表达式去除首尾的所有空白字符（包括空格、制表符、换行符、回车符等）
+                                    value = value.replace(/^[\s\r\n]+|[\s\r\n]+$/g, '');
+                                    
+                                    // 如果是提货号，去除包含 $ 字符的子字符串
+                                    if (enKey === 'pickupNumber' || enKey === 'pickupAddress1' || enKey === 'description') {
+                                        // 移除所有包含 $ 的子字符串（包括 $ 本身和周围的字符）
+                                        // 匹配模式：可选的前后空白 + $ + 可选的数字/字符
+                                        value = value.replace(/\s*[^\s]*\$[^\s]*/g, '').trim();                                    }
+                                // 如果是货运公司字段，将其中的电话和邮箱转为链接
+                                if (enKey === 'carrierCompany') {
+                                        // 再次清理可能产生的多余空格
+                                        value = value.replace(/\s+/g, ' ').trim();
+                                        // **修正：调用 linkifyValue 函数**
+                                        value = linkifyValue(value);
+                                    }
+                                }
+                                
+                                const isAddress = enKey.includes('Address') || enKey === 'description' || enKey === 'carrierCompany';
+                                const isTime = enKey.includes('Time');
+                                
+                                return `
+                                    <div class="border-b border-gray-100 pb-1.5 last:border-0">
+                                        <div class="flex items-start gap-2">
+                                            <span class="font-semibold text-gray-600 text-xs min-w-[80px] flex-shrink-0 text-right">${key}:</span>
+                                            <span class="text-gray-800 text-xs flex-1 text-left ${isAddress ? 'whitespace-pre-wrap break-words' : ''} ${isTime ? 'font-mono' : ''}">${value}</span>
+                                        </div>
+                                    </div>
+                                `;
+                            }).filter(html => html.trim() !== '').join('')}
+                        </div>
+                    </div>
+                `;
+                
+                shipmentContent.innerHTML = detailHTML;
+                shipmentLoading.classList.add('hidden');
+                shipmentContent.classList.remove('hidden');
+                
+            } catch (error) {
+                console.error('加载货运信息失败:', error);
+                shipmentLoading.classList.add('hidden');
+                shipmentError.classList.remove('hidden');
+                shipmentErrorMessage.textContent = `加载失败: ${error.message}`;
+            }
+        }
+
+        /**
+         * 关闭货运信息 Overlay
+         */
+        function closeShipmentOverlay() {
+            const shipmentOverlay = document.getElementById('shipment-overlay');
+            shipmentOverlay.classList.remove('show');
+        }
+
+        /**
+         * 加载指定 huoyunId 下的所有 trackId 的 GPS 轨迹数据。
+         * @param {string} huoyunId - 要加载的货运单 ID。
+         */
+        async function loadAllTracesForHuoyun(huoyunId) {
+            clearMapLayers(); // This also stops all previous watchers.
+            const trackData = huoyunTrackData[huoyunId];
+            if (!trackData || !Array.isArray(trackData.tracks) || trackData.tracks.length === 0) {
+                traceStateElement.textContent = '未找到任何轨迹数据。';
+                return;
+            }
+
+            const allTracks = trackData.tracks;
+            const totalTracks = allTracks.length;
+            const bounds = new google.maps.LatLngBounds();
+            let renderedCount = 0;
+            let failedCount = 0;
+
+            gpsButton.disabled = true; // 禁用按钮防止重复点击
+            traceStateElement.textContent = '正在加载...';
+
+            for (let i = 0; i < totalTracks; i++) {
+                const track = allTracks[i];
+                if (!track || !track._id) continue;
+                const trackId = track._id;
+                const trackStatus = (track.status || 'unknown').toLowerCase();
+                const isLatest = trackId === trackData.latestTrackId;
+                const color = isLatest ? TRACE_COLORS[0] : TRACE_COLORS[0];
+
+                loadingStatusArea.innerHTML = `正在加载轨迹 <span class="font-bold text-primary-blue">${i + 1}/${totalTracks}</span> (ID: ${trackId})...`;
+
+                try {
+                    const success = await loadTrackWithStreaming({
+                        trackId,
+                        huoyunId,
+                        color,
+                        isLatest,
+                        status: trackStatus,
+                        trackIndex: i + 1,
+                        totalTracks,
+                        bounds
+                    });
+
+                    if (success) {
+                        renderedCount++;
+                    } else {
+                        failedCount++;
+                    }
+                    
+                    traceStateElement.textContent = `已渲染 成功:${renderedCount}/${totalTracks} 无效:${failedCount}/${totalTracks} 条轨迹...`;
+
+                } catch (error) {
+                    console.error(`加载轨迹 ${trackId} 失败:`, error);
+                    failedCount++;
+                }
+            }
+
+            loadingStatusArea.textContent = ''; // 清除加载状态
+
+            if (renderedCount > 0) {
+                if (bounds && typeof bounds.isEmpty === 'function' && !bounds.isEmpty()) {
+                    map.fitBounds(bounds);
+                    debugLog(`FitBounds: Final fit for huoyunId '${currentHuoyunId}' to show all loaded tracks.`);
+                    if (map.getZoom() > 15) {
+                        map.setZoom(15);
+                    }
+                }
+                traceStateElement.textContent = `加载完成：成功:${renderedCount}/${totalTracks} 无效:${failedCount}/${totalTracks} 条轨迹。`;
+            } else {
+                traceStateElement.textContent = `加载失败：未找到任何有效的轨迹数据。`;
+            }
+            
+            // New Watcher Logic: Start watcher only if the latest track is 'recording'.
+            const latestTrack = trackData.tracks.find(t => t._id === trackData.latestTrackId);
+            if (latestTrack && (latestTrack.status || '').toLowerCase() === 'recording') {
+                debugLog(`最新轨迹 ${latestTrack._id} 是 recording 状态，启动观察者。`);
+                startRecordingWatcher(latestTrack._id);
+            } else {
+                debugLog(`最新轨迹 ${latestTrack._id} 是 finished 状态，无需启动观察者。`);
+            }
+
+            gpsButton.disabled = false; // 重新启用按钮
+        }
+
+
+        const GPS_PAGE_SIZE = 1000;
+
+        /**
+         * 边加载边绘制单条轨迹 (使用分页缓存)。
+         * @param {Object} params
+         * @returns {Promise<Array|null>}
+         */
+        async function loadTrackWithStreaming(params) {
+            const {
+                trackId,
+                huoyunId,
+                color,
+                isLatest,
+                status,
+                trackIndex,
+                totalTracks,
+                bounds
+            } = params;
+
+            if (!trackId) return null;
+            const normalizedStatus = (status || 'unknown').toLowerCase();
+            const isRecording = normalizedStatus === 'recording';
+            
+            let allPoints = [];
+            let page = 1;
+            let keepFetching = true;
+
+            while (keepFetching) {
+                if (typeof trackIndex === 'number' && typeof totalTracks === 'number') {
+                    loadingStatusArea.innerHTML = `
+                        轨迹 <span class="font-bold text-primary-blue">${trackIndex}/${totalTracks}</span>
+                        已加载 <span class="font-bold text-accent-orange">${allPoints.length}</span> 个点 (第 ${page} 页)...
+                    `;
+                }
+
+                const cachedPage = readGpsPageCache(trackId, page);
+                let points = [];
+
+                if (cachedPage) {
+                    points = cachedPage;
+                } else {
+                    let attempt = 0;
+                    const maxAttempts = 3;
+                    let pageData = null;
+                    let success = false;
+
+                    while (attempt < maxAttempts) {
+                        try {
+                            const delay = 500 * Math.pow(2, attempt);
+                            if (attempt > 0) {
+                                await new Promise(resolve => setTimeout(resolve, delay));
+                            }
+
+                            const skip = (page - 1) * GPS_PAGE_SIZE;
+                            const payload = { trackId, skip, pagesize: GPS_PAGE_SIZE };
+
+                            debugLog(`Load: Fetching points for track '${trackId}', page ${page} (skip: ${skip}).`);
+
+                            const response = await authenticatedFetch(TRACE_POINTS_API_URL, {
+                                method: 'POST',
+                                body: JSON.stringify(payload)
+                            });
+
+                            if (!response.ok) {
+                                throw new Error(`HTTP 错误: ${response.status} ${response.statusText}`);
+                            }
+
+                            const jsonResponse = await response.json();
+
+                            if (jsonResponse.code === 0 && Array.isArray(jsonResponse.data)) {
+                                pageData = jsonResponse.data;
+                                success = true;
+                                debugLog(`Load Success: Received ${pageData.length} points for track '${trackId}', page ${page}.`);
+                                break;
+                            } else {
+                                throw new Error(`云函数业务错误: ${jsonResponse.message || '未知错误'}`);
+                            }
+
+                        } catch (error) {
+                            attempt++;
+                            debugLog(`Load Error: Failed to fetch points for track '${trackId}', page ${page}. Attempt ${attempt}/${maxAttempts}. Error: ${error.message}`);
+                            console.error(`获取轨迹 ${trackId} 第 ${page} 页失败，重试中...`);
+                            if (attempt >= maxAttempts) {
+                                throw new Error(`无法从 API 加载轨迹 ${trackId}。`);
+                            }
+                        }
+                    }
+
+                    if (!success || !Array.isArray(pageData)) {
+                        keepFetching = false;
+                        break;
+                    }
+                
+                    const normalizedPoints = pageData.map(p => ({
+                        lat: p.lat,
+                        lng: p.lng,
+                        timestamp: p.ts,
+                        speed: typeof p.speed === 'number' ? p.speed : null
+                    }));
+
+                    // 缓存逻辑:
+                    // - recording轨迹: 只有满页才写入缓存. 不满的最后一页存入 partial buffer.
+                    // - finished轨迹: 所有页都写入缓存.
+                    if (normalizedPoints.length > 0) {
+                        if (isRecording) {
+                            if (normalizedPoints.length === GPS_PAGE_SIZE) {
+                                writeGpsPageCache(trackId, page, normalizedPoints);
+                            } else {
+                                // 这是 recording 轨迹的最后一页，且不满，存入缓冲区
+                                recordingTrackPartialBuffers[trackId] = {
+                                    points: normalizedPoints,
+                                    targetPage: page
+                                };
+                                debugLog(`Track ${trackId} (recording) last partial page buffered with ${normalizedPoints.length} points for page ${page}.`);
+                            }
+                        } else {
+                            // finished 轨迹，总是写入缓存
+                            writeGpsPageCache(trackId, page, normalizedPoints);
+                        }
+                    }
+
+                    points = normalizedPoints;
+                }
+                
+                // render newly loaded points
+                if (points && points.length > 0) {
+                    allPoints.push(...points);
+
+                    drawOrUpdateTrace({
+                        trackId,
+                        points: allPoints,
+                        isLatest,
+                        color,
+                        status: normalizedStatus,
+                        huoyunId,
+                        speed: getLatestSpeed(allPoints)
+                    });
+                    extendBoundsWithPoints(bounds, points);
+
+                    // 如果是第一条轨迹的第一页，立即调整视野
+                    if (trackIndex === 1 && page === 1 && bounds && !bounds.isEmpty()) {
+                        map.fitBounds(bounds);
+                        debugLog(`FitBounds: Initial fit for first page of track '${trackId}'.`);
+                        if (map.getZoom() > 15) {
+                            map.setZoom(15);
+                        }
+                    }
+                }
+                
+                // stopping criterior
+                if (points.length < GPS_PAGE_SIZE) {
+                    keepFetching = false;
+                } else {
+                    page++;
+                }
+            }
+            
+            // 确保最后完整绘制一次
+            drawOrUpdateTrace({
+                trackId,
+                points: allPoints,
+                isLatest,
+                color,
+                status: normalizedStatus,
+                huoyunId,
+                speed: getLatestSpeed(allPoints)
+            });
+
+            if (allPoints.length > 0) {
+                return allPoints;
+            }
+
+            return null;
+        }
+
+        /**
+         * 创建终点图标 (货车或圆点)。
+         */
+        function buildEndMarkerIcon({ color, isLatest, huoyunId, speed, status, latestTimestamp }) {
+            if (isLatest) {
+                return buildLatestMarkerIcon({ huoyunId, speed, status, latestTimestamp });
+            }
+            return {
+                path: google.maps.SymbolPath.CIRCLE,
+                scale: 6,
+                fillColor: color,
+                fillOpacity: 1,
+                strokeWeight: 1,
+                strokeColor: '#ffffff'
+            };
+        }
+
+        /**
+         * 创建起点圆点图标。
+         */
+        function buildStartMarkerIcon(color) {
+            return {
+                path: google.maps.SymbolPath.CIRCLE,
+                scale: 6,
+                fillColor: color,
+                fillOpacity: 0,
+                strokeWeight: 1,
+                strokeColor: color
+            };
+        }
+
+        /**
+         * 创建“当前货车位置”专用圆形徽章。
+         * @param {string} huoyunId 
+         * @param {string} color 
+         */
+        function buildLatestMarkerIcon({ huoyunId, speed, status, latestTimestamp }) {
+            const label = (huoyunId || 'N/A').toString();
+            const normalizedLabel = label.trim() || 'N/A';
+            const diameter = 72;
+            const scale = 2; // canvas 高清绘制
+            const canvas = document.createElement('canvas');
+            canvas.width = diameter * scale;
+            canvas.height = diameter * scale;
+            const ctx = canvas.getContext('2d');
+            const center = (diameter * scale) / 2;
+            const radius = (diameter * scale) / 2 - 6;
+
+            // 背景阴影
+            ctx.beginPath();
+            ctx.arc(center, center, radius + 4, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(15,23,42,0.15)';
+            ctx.fill();
+
+            // 主圆
+            ctx.beginPath();
+            ctx.arc(center, center, radius, 0, Math.PI * 2);
+            ctx.fillStyle = LATEST_MARKER_BACKGROUND_COLOR;
+            ctx.fill();
+
+            // 白色描边
+            ctx.lineWidth = 6;
+            ctx.strokeStyle = '#ffffff';
+            ctx.stroke();
+
+            // 文本绘制，过长则拆成两行
+            ctx.fillStyle = '#FFFF00';
+            ctx.textAlign = 'center';
+            const textLines = [];
+            if (normalizedLabel.length <= 8) {
+                textLines.push(normalizedLabel);
+            } else {
+                const mid = Math.ceil(normalizedLabel.length / 2);
+                textLines.push(normalizedLabel.slice(0, mid));
+                textLines.push(normalizedLabel.slice(mid));
+            }
+            const timeLine = formatPointTimeLine(latestTimestamp);
+            const speedLine = formatSpeedLine(speed);
+            textLines.push(timeLine);
+            textLines.push(speedLine);
+            const baseFontSize = textLines.length === 1 ? 12 : 10;
+            ctx.font = `600 ${baseFontSize * scale}px Inter, sans-serif`;
+            const lineHeight = (baseFontSize + 4) * scale;
+            const startY = center - ((textLines.length - 1) * lineHeight) / 2;
+            textLines.forEach((line, idx) => {
+                const isInfoLine = line === timeLine || line === speedLine;
+                if (isInfoLine) {
+                    ctx.save();
+                    const infoFontSize = baseFontSize * 0.8 * 1.15; // 时间和速度字体放大 15%
+                    ctx.font = `600 ${(infoFontSize) * scale}px Inter, sans-serif`;
+                    ctx.fillText(line, center, startY + idx * lineHeight);
+                    ctx.restore();
+                } else {
+                    ctx.fillText(line, center, startY + idx * lineHeight);
+                }
+            });
+
+            return {
+                url: canvas.toDataURL(),
+                scaledSize: new google.maps.Size(diameter, diameter),
+                anchor: new google.maps.Point(diameter / 2, diameter / 2)
+            };
+        }
+
+        /**
+         * 将卫星路线弹窗绑定到 marker。
+         * @param {google.maps.Marker} marker
+         * @param {{lat:number,lng:number}} coords
+         */
+        function attachRouteClick(marker, coords) {
+            if (!marker || !coords) return;
+            marker.__routeOrigin = coords;
+            if (!marker.__routeListener) {
+                marker.__routeListener = marker.addListener('click', () => {
+                    if (marker.__routeOrigin) {
+                        openRouteModal(marker.__routeOrigin);
+                    }
+                });
+            }
+        }
+
+        /**
+         * 将速度值格式化为显示文本。
+         * @param {number|null} speed
+         * @returns {string|null}
+         */
+        function formatSpeedLine(speed) {
+            if (typeof speed === 'number' && !isNaN(speed)) {
+                return `速度: ${speed.toFixed(1)}`;
+            }
+            return '速度: --';
+        }
+
+        /**
+         * 将最新轨迹点时间格式化为显示文本。
+         * @param {number|null} timestamp
+         * @returns {string}
+         */
+        function formatPointTimeLine(timestamp) {
+            if (typeof timestamp === 'number' && !isNaN(timestamp)) {
+                return `${formatTime(timestamp)}`;
+            }
+            return '--';
+        }
+
+        /**
+         * 渲染或更新单条轨迹的可视化元素。
+         * @param {Object} trace - { trackId, points, isLatest, color, status }
+         * @param {Object} options - { skipBoundsFit?: boolean }
+         */
+        function drawOrUpdateTrace(trace) {
+            debugLog(`Render: drawOrUpdateTrace called for track '${trace.trackId}' with ${trace.points.length} points.`);
+            if (!trace || !trace.trackId || !Array.isArray(trace.points)) {
+                debugLog(`Render Abort: Invalid trace data for track '${trace.trackId}'.`);
+                return;
+            }
+
+            const normalizedStatus = (trace.status || '').toLowerCase();
+            const path = trace.points.map(point => ({ lat: point.lat, lng: point.lng }));
+
+            // Handle the case of a recording track with no points by creating a placeholder overlay.
+            // This ensures the watcher function can find the overlay object and start polling for points.
+            if (path.length === 0 && normalizedStatus === 'recording') {
+                if (!trackOverlayMap[trace.trackId]) {
+                    debugLog(`Render: Creating placeholder for recording track '${trace.trackId}'.`);
+                    
+                    const displayHuoyunId = trace.huoyunId || (huoyunTrackData[currentHuoyunId]?.tracks?.find(t => t._id === trace.trackId)?.huoyunId) || currentHuoyunId || '';
+
+                    const placeholderOverlay = {
+                        polyline: new google.maps.Polyline({
+                            map,
+                            path: [],
+                            strokeColor: trace.color,
+                            strokeWeight: trace.isLatest ? 5 : 5,
+                            strokeOpacity: trace.isLatest ? 1.0 : 1.0,
+                            geodesic: true
+                        }),
+                        startMarker: new google.maps.Marker({ map, visible: false }),
+                        endMarker: new google.maps.Marker({ map, visible: false, zIndex: trace.isLatest ? LATEST_MARKER_Z_INDEX : DEFAULT_MARKER_Z_INDEX }),
+                        color: trace.color,
+                        isLatest: trace.isLatest,
+                        status: normalizedStatus,
+                        huoyunId: displayHuoyunId,
+                        speed: null,
+                        latestTimestamp: null,
+                        pointsCount: 0
+                    };
+                    trackOverlayMap[trace.trackId] = placeholderOverlay;
+                    polylineLayer.push(placeholderOverlay.polyline);
+                    markerLayer.push(placeholderOverlay.startMarker, placeholderOverlay.endMarker);
+                }
+                return; // Return after creating the placeholder. Nothing to draw yet.
+            }
+            
+            if (path.length === 0) {
+                debugLog(`Render Abort: No points to render for track '${trace.trackId}'.`);
+                return;
+            }
+
+            const latestTimestamp = getLatestTimestamp(trace.points);
+            const displayHuoyunId = trace.huoyunId || (huoyunTrackData[currentHuoyunId]?.tracks?.find(t => t._id === trace.trackId)?.huoyunId) || currentHuoyunId || '';
+            let overlay = trackOverlayMap[trace.trackId];
+
+            if (!overlay) {
+                debugLog(`Render: Creating new map objects for track '${trace.trackId}'.`);
+                const polyline = new google.maps.Polyline({
+                    path: [], // Start with an empty path
+                    geodesic: true,
+                    strokeColor: trace.color,
+                    strokeOpacity: trace.isLatest ? 1.0 : 1.0,
+                    strokeWeight: trace.isLatest ? 5 : 5,
+                    map
+                });
+                const startMarker = new google.maps.Marker({
+                    position: path[0],
+                    map,
+                    title: `轨迹起点: ${trace.trackId}`,
+                    icon: buildStartMarkerIcon(trace.color)
+                });
+                const endMarker = new google.maps.Marker({
+                    position: path[0], // Initially at start
+                    map,
+                    title: trace.isLatest ? `当前货车位置 (最新轨迹: ${trace.trackId})` : `轨迹终点: ${trace.trackId}`,
+                    icon: buildEndMarkerIcon({
+                        color: trace.color,
+                        isLatest: trace.isLatest,
+                        huoyunId: displayHuoyunId,
+                        speed: typeof trace.speed === 'number' ? trace.speed : null,
+                        status: normalizedStatus,
+                        latestTimestamp
+                    }),
+                    zIndex: trace.isLatest ? LATEST_MARKER_Z_INDEX : DEFAULT_MARKER_Z_INDEX,
+                    opacity: trace.isLatest ? LATEST_MARKER_OPACITY : 1
+                });
+                attachRouteClick(endMarker, path[path.length - 1]);
+
+                overlay = {
+                    polyline,
+                    startMarker,
+                    endMarker,
+                    color: trace.color,
+                    isLatest: trace.isLatest,
+                    status: normalizedStatus,
+                    huoyunId: displayHuoyunId,
+                    speed: typeof trace.speed === 'number' ? trace.speed : null,
+                    latestTimestamp,
+                    pointsCount: 0 // Initially 0
+                };
+                trackOverlayMap[trace.trackId] = overlay;
+                debugLog(`add trackOverlayMap for ${trace.trackId}`)
+                polylineLayer.push(polyline);
+                markerLayer.push(startMarker);
+                markerLayer.push(endMarker);
+
+                // Add points to rendering queue
+                debugLog(`Render: Queuing ${path.length} new points for track '${trace.trackId}'.`);
+                if (!renderingQueue[trace.trackId]) {
+                    renderingQueue[trace.trackId] = { points: [], timeToRenderMs: 0 };
+                }
+                renderingQueue[trace.trackId].points.push(...path);
+                renderingQueue[trace.trackId].timeToRenderMs += 1500; // Animate over 1.5s
+                overlay.pointsCount = path.length;
+
+            } else {
+-                debugLog(`Render: Updating existing map objects for track '${trace.trackId}'. Path length now ${path.length}.`);
+                 // The trace object contains ALL points loaded so far for this track.
+                // We need to find just the new points to add to the animation queue.
+                const newPoints = path.slice(overlay.pointsCount);
+
+                if (newPoints.length > 0) {
+                    debugLog(`Render: Queuing ${newPoints.length} new points for track '${trace.trackId}'.`);
+
+                    if (!renderingQueue[trace.trackId]) {
+                        renderingQueue[trace.trackId] = { points: [], timeToRenderMs: 0 };
+                    }
+                    renderingQueue[trace.trackId].points.push(...newPoints);
+                    renderingQueue[trace.trackId].timeToRenderMs += 1500; // Animate each new chunk
+
+                    // Update total points count
+                    overlay.pointsCount = path.length;
+                }
+
+                // Even if no new points, update marker styles etc.
+                overlay.polyline.setOptions({
+                    strokeColor: trace.color,
+                    strokeOpacity: trace.isLatest ? 1.0 : 1.0,
+                    strokeWeight: trace.isLatest ? 5 : 5
+                });
+                overlay.endMarker.setIcon(buildEndMarkerIcon({
+                    color: trace.color,
+                    isLatest: trace.isLatest,
+                    huoyunId: displayHuoyunId || overlay.huoyunId,
+                    speed: typeof trace.speed === 'number' ? trace.speed : overlay.speed,
+                    status: normalizedStatus,
+                    latestTimestamp: latestTimestamp ?? overlay.latestTimestamp
+                }));
+                overlay.endMarker.setZIndex(trace.isLatest ? LATEST_MARKER_Z_INDEX : DEFAULT_MARKER_Z_INDEX);
+                attachRouteClick(overlay.endMarker, path[path.length - 1]);
+                overlay.color = trace.color;
+                overlay.isLatest = trace.isLatest;
+                overlay.status = normalizedStatus;
+                overlay.huoyunId = displayHuoyunId || overlay.huoyunId;
+                overlay.speed = typeof trace.speed === 'number' ? trace.speed : overlay.speed;
+                overlay.latestTimestamp = latestTimestamp ?? overlay.latestTimestamp;
+            }
+        }
+    </script>
+    
+    <!-- 加载 Google Maps API 脚本 -->
+    <script async defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAqfM8VxP7S-8Jl1Eu4WDbDf1zz-JHiKHw&callback=initMap&libraries=geometry,places"></script>
+</body>
+</html>

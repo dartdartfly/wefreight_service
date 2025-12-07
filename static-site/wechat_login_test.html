@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微信网站应用登录示例</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 使用自定义 CSS 确保背景和字体美观 */
+        body {
+            background-color: #f7f9fb;
+            font-family: 'Inter', sans-serif;
+        }
+        /* 模拟微信登录框的样式 */
+        .wechat-login-box {
+            background-color: white;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            border-radius: 12px;
+            padding: 32px;
+            text-align: center;
+        }
+        /* 确保二维码容器居中 */
+        #qrcode-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 250px;
+            margin-top: 20px;
+            margin-bottom: 20px;
+            background-color: #e5e7eb; /* Placeholder background */
+            border-radius: 8px;
+            font-size: 0.875rem;
+            color: #4b5563;
+        }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen">
+
+    <div class="wechat-login-box w-full max-w-sm">
+        <h1 class="text-2xl font-bold text-gray-800 mb-2">欢迎登录您的应用</h1>
+        <p class="text-sm text-gray-500 mb-6">请使用微信扫码授权</p>
+        
+        <!-- 配置提示（如果未配置） -->
+        <div id="config-hint" class="hidden mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-left">
+            <p class="text-xs text-yellow-800 font-semibold mb-1">📝 配置提示</p>
+            <p class="text-xs text-yellow-700">请在页面加载前设置：</p>
+            <code class="text-xs bg-yellow-100 px-2 py-1 rounded block mt-1">window.__wechat_appid = '你的AppID'</code>
+        </div>
+        
+        <!-- 
+            这是嵌入微信登录二维码的核心容器。
+            微信的 JS 脚本将在这个 ID 为 'qrcode-container' 的元素内生成 QR 码。
+        -->
+        <div id="qrcode-container" class="transition duration-300">
+            <!-- 实际的 QR 码将通过 JavaScript 注入到这里 -->
+            <p class="text-gray-500">正在加载二维码...</p>
+        </div>
+
+        <p class="text-xs text-gray-400 mt-4">
+            扫描成功后，请在手机上确认授权。
+        </p>
+        
+        <!-- 调试信息（开发时可见） -->
+        <div id="debug-info" class="hidden mt-4 p-2 bg-gray-50 rounded text-left text-xs">
+            <p class="font-semibold mb-1">调试信息：</p>
+            <pre id="debug-content" class="text-xs overflow-auto"></pre>
+        </div>
+    </div>
+
+    <!-- 微信官方登录 JS SDK -->
+    <script src="https://res.wx.qq.com/connect/zh_CN/htmledition/js/wxLogin.js"></script>
+    
+    <script>
+        // ===== 配置区域 =====
+        // 请替换为你的微信开放平台应用配置
+        const WECHAT_CONFIG = {
+            appid: typeof __wechat_appid !== 'undefined' ? __wechat_appid : 'wxfa0de745b8004742',  // 微信开放平台 AppID
+            redirect_uri: typeof __wechat_redirect_uri !== 'undefined' ? __wechat_redirect_uri : encodeURIComponent(window.location.origin + '/callback.html'),  // 授权回调地址（需要 URL 编码）
+            state: 'test_state_' + Date.now(),  // 自定义状态参数
+            style: 'black'  // 二维码样式：'black' 或 'white'
+        };
+        // ====================
+
+        function initWeChatLogin() {
+            const container = document.getElementById('qrcode-container');
+            const configHint = document.getElementById('config-hint');
+            const debugInfo = document.getElementById('debug-info');
+            const debugContent = document.getElementById('debug-content');
+            
+            // 检查配置
+            if (!WECHAT_CONFIG.appid || WECHAT_CONFIG.appid === 'YOUR_WECHAT_APPID') {
+                configHint.classList.remove('hidden');
+                container.innerHTML = `
+                    <div class="p-4 text-center">
+                        <p class="text-red-600 font-semibold mb-2">⚠️ 配置错误</p>
+                        <p class="text-sm text-gray-600 mb-2">请先配置微信 AppID</p>
+                        <p class="text-xs text-gray-500">在代码中设置 <code class="bg-gray-200 px-1 rounded">WECHAT_CONFIG.appid</code></p>
+                        <p class="text-xs text-gray-500 mt-2">或在页面加载前设置：<code class="bg-gray-200 px-1 rounded">window.__wechat_appid = '你的AppID'</code></p>
+                    </div>
+                `;
+                return;
+            } else {
+                configHint.classList.add('hidden');
+            }
+            
+            // 显示调试信息（开发环境）
+            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                debugInfo.classList.remove('hidden');
+                debugContent.textContent = JSON.stringify({
+                    appid: WECHAT_CONFIG.appid,
+                    redirect_uri: decodeURIComponent(WECHAT_CONFIG.redirect_uri),
+                    state: WECHAT_CONFIG.state,
+                    wxLogin_loaded: typeof WxLogin !== 'undefined'
+                }, null, 2);
+            }
+
+            // 检查 wxLogin.js 是否加载完成
+            if (typeof WxLogin === 'undefined') {
+                container.innerHTML = `
+                    <div class="p-4 text-center">
+                        <p class="text-yellow-600 font-semibold mb-2">⏳ 正在加载微信登录组件...</p>
+                        <p class="text-xs text-gray-500">如果长时间未显示，请检查网络连接</p>
+                    </div>
+                `;
+                
+                // 等待 wxLogin.js 加载（最多等待 5 秒）
+                let waitCount = 0;
+                const checkInterval = setInterval(() => {
+                    waitCount++;
+                    if (typeof WxLogin !== 'undefined') {
+                        clearInterval(checkInterval);
+                        initWeChatLogin(); // 重新初始化
+                    } else if (waitCount > 50) { // 5秒后超时
+                        clearInterval(checkInterval);
+                        container.innerHTML = `
+                            <div class="p-4 text-center">
+                                <p class="text-red-600 font-semibold mb-2">❌ 加载失败</p>
+                                <p class="text-sm text-gray-600">无法加载微信登录组件</p>
+                                <p class="text-xs text-gray-500 mt-2">请检查 <code class="bg-gray-200 px-1 rounded">wxLogin.js</code> 是否正确引入</p>
+                            </div>
+                        `;
+                    }
+                }, 100);
+                return;
+            }
+
+            // 清空容器内容
+            container.innerHTML = '';
+            container.style.backgroundColor = 'transparent';
+
+            try {
+                // 初始化微信登录组件
+                const wxLogin = new WxLogin({
+                    self_redirect: false,           // false: 在 iframe 中显示二维码，true: 直接跳转
+                    id: "qrcode-container",         // 容器 ID
+                    appid: WECHAT_CONFIG.appid,     // 微信开放平台 AppID
+                    scope: "snsapi_login",          // 授权范围：snsapi_login（网站应用登录）
+                    redirect_uri: WECHAT_CONFIG.redirect_uri,  // 授权后回调地址（必须 URL 编码）
+                    state: WECHAT_CONFIG.state,     // 自定义状态参数（用于防止 CSRF）
+                    style: WECHAT_CONFIG.style,     // 二维码样式
+                    href: ""                        // 自定义 CSS 文件 URL（可选）
+                });
+                
+                console.log("✅ 微信登录组件初始化成功");
+                console.log("配置信息:", WECHAT_CONFIG);
+                
+            } catch (error) {
+                console.error("❌ 微信登录组件初始化失败:", error);
+                container.innerHTML = `
+                    <div class="p-4 text-center">
+                        <p class="text-red-600 font-semibold mb-2">❌ 初始化失败</p>
+                        <p class="text-sm text-gray-600">${error.message || '未知错误'}</p>
+                        <p class="text-xs text-gray-500 mt-2">请检查控制台查看详细错误信息</p>
+                    </div>
+                `;
+            }
+        }
+
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            // 先显示加载状态
+            const container = document.getElementById('qrcode-container');
+            container.innerHTML = '<p class="text-gray-500">正在初始化...</p>';
+            
+            // 等待一小段时间确保 DOM 完全加载，然后初始化
+            setTimeout(initWeChatLogin, 100);
+        });
+
+        // 如果 DOM 已经加载完成，直接初始化
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+            setTimeout(initWeChatLogin, 100);
+        }
+    </script>
+</body>
+</html>
