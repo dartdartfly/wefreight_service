@@ -1,18 +1,13 @@
 {
+  "version": 2,
   "builds": [
-    {
-      "src": "api/**/*.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "static-site/**",
-      "use": "@vercel/static"
-    }
+    { "src": "api/**/*.js", "use": "@vercel/node" },
+    { "src": "static-site/**/*", "use": "@vercel/static" }
   ],
-  "rewrites": [
-    {
-      "source": "/((?!api/|static-site/).*)",
-      "destination": "/static-site/$1"
-    }
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/$1" },
+    { "src": "/static-site/(.*)", "dest": "/static-site/$1" },
+    { "src": "/", "dest": "/static-site/index.html" },
+    { "src": "/(.*)", "dest": "/static-site/$1" }
   ]
 }
