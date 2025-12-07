@@ -1,0 +1,13 @@
+{
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/static-site/$1"
+    }
+  ],
+  "rewrites": [
+    { 
+       "source": "/(.*)",
+       "destination": "/index.html" }
+  ]
+}
