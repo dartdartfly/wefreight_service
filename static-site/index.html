@@ -2096,7 +2096,7 @@
                 });
 
                 if (!indexResponse.ok) {
-                    throw new Error(`索引 API 请求失败，状态码: ${indexResponse.status} 状态:${indexResponse}`);
+                    throw new Error(`索引 API 请求失败，状态码: ${indexResponse.status} 状态:${JSON.stringify(indexResponse)}`);
                 }
                 
                 const indexResult = await indexResponse.json();
@@ -2128,7 +2128,7 @@
                 });
                 
                 if (!dataResponse.ok) {
-                    throw new Error(`数据 API 请求失败，状态码: ${dataResponse.status} 状态：${indexResponse}`);
+                    throw new Error(`数据 API 请求失败，状态码: ${dataResponse.status} 状态：${JSON.stringify(indexResponse)}`);
                 }
                 
                 const dataResult = await dataResponse.json();
