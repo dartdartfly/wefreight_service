@@ -2096,7 +2096,7 @@
                 });
 
                 if (!indexResponse.ok) {
-                    throw new Error(`索引 API 请求失败，状态码: ${indexResponse.status}`);
+                    throw new Error(`索引 API 请求失败，状态码: ${indexResponse.status} 状态:${indexResponse}`);
                 }
                 
                 const indexResult = await indexResponse.json();
