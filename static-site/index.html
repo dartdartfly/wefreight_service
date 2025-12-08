@@ -1046,9 +1046,8 @@
 
                     const newPoints = queue.points.splice(0, pointsToRenderThisFrame);
                     const currentPath = overlay.polyline.getPath();
-                    
 
-                    debugLog(`pointsThisFrame:${pointsToRenderThisFrame} pointsPerSec:${pointsToRenderPerMs*1000.0} delta:${pointsToRenderPerMs * deltaTime}`);
+                    // debugLog(`pointsThisFrame:${pointsToRenderThisFrame} pointsPerSec:${pointsToRenderPerMs*1000.0} delta:${pointsToRenderPerMs * deltaTime}`);
 
                     newPoints.forEach(p => currentPath.push(new google.maps.LatLng(p.lat, p.lng)));
 
