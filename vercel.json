@@ -1,13 +1,18 @@
 {
-  "version": 2,
-  "builds": [
-    { "src": "api/**/*.js", "use": "@vercel/node" },
-    { "src": "static-site/**/*", "use": "@vercel/static" }
-  ],
+  "functions": {
+    "api/**/*.js": {
+      "memory": 128,
+      "maxDuration": 10
+    }
+  },
   "routes": [
-    { "src": "/api/(.*)", "dest": "/api/$1" },
-    { "src": "/static-site/(.*)", "dest": "/static-site/$1" },
-    { "src": "/", "dest": "/static-site/index.html" },
-    { "src": "/(.*)", "dest": "/static-site/$1" }
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/static-site/$1"
+    }
   ]
 }
