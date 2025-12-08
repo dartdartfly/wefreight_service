@@ -1044,13 +1044,12 @@
                     }
                     // --- End of new logic ---
 
-                    debugLog('pointsThisFrame', pointsToRenderThisFrame, "pointsPerSec", pointsToRenderPerMs*1000.0,
-				"deltaTimeSec", deltaTime/1000.0);
-                      
-
                     const newPoints = queue.points.splice(0, pointsToRenderThisFrame);
                     const currentPath = overlay.polyline.getPath();
                     
+
+                    debugLog(`pointsThisFrame:${pointsToRenderThisFrame} pointsPerSec:${pointsToRenderPerMs*1000.0} delta:${pointsToRenderPerMs * deltaTime}`);
+
                     newPoints.forEach(p => currentPath.push(new google.maps.LatLng(p.lat, p.lng)));
 
                     // Update end marker position
