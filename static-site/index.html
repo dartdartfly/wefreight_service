@@ -1517,12 +1517,11 @@
          * 停止指定 recording 轨迹的轮询。
          * @param {string} trackId 
          */
-        function stopRecordingWatcher(trackId) {
-            debugLog(`stopRecordingWatcher clear interval and delete timer ${recordingTrackTimers[trackId]}`);
-            delete renderingQueue[trackId]; // 清理渲染队列
-            if (recordingTrackTimers[trackId]) {
-                clearInterval(recordingTrackTimers[trackId]);
-                delete recordingTrackTimers[trackId];
+        function stopRecordingWatcher(huoyunId) {
+            debugLog(`stopRecordingWatcher clear interval and delete timer for huoyunId ${huoyunId}`);
+            if (recordingTrackTimers[huoyunId]) {
+                clearInterval(recordingTrackTimers[huoyunId]);
+                delete recordingTrackTimers[huoyunId];
             }
         }
 
@@ -1563,182 +1562,82 @@
 
         /**
          * 为 recording 状态的轨迹启动轮询刷新。
-         * 在此函数中，从服务器获取的新轨迹点会先被添加到 `recordingTrackPartialBuffers`。
-         * 当缓冲区中的数据量满一个页面（GPS_PAGE_SIZE）时，它将被写入缓存。
-         * 地图上的轨迹线会实时更新，以提供即时反馈。
-         * @param {string} trackId 
+         * @param {string} huoyunId 
          */
-        function startRecordingWatcher(trackId) {
-            if (recordingTrackTimers[trackId]) return;
+        function startRecordingWatcher(huoyunId) {
+            if (recordingTrackTimers[huoyunId]) return;
 
-            // 使用一个闭包变量来持续追踪此轨迹已获取的总点数
-            let totalKnownPoints;
+            debugLog(`startRecordingWatcher for huoyunId:${huoyunId}`);
 
-            debugLog(`startRecordingWatcher for track:${trackId}`);
             const poll = async () => {
-                const overlay = trackOverlayMap[trackId];
-                if (!overlay || mapView.classList.contains('hidden')) {
-                    debugLog(`stopRecordingWatcher for track:${trackId} reason: overlay:${overlay} hidden:${mapView.classList.contains('hidden')}`)
-                    stopRecordingWatcher(trackId);
+                const currentTrackData = huoyunTrackData[huoyunId];
+                if (!currentTrackData || mapView.classList.contains('hidden')) {
+                    stopRecordingWatcher(huoyunId);
                     return;
                 }
 
-                // 首次轮询时，初始化 totalKnownPoints
-                // 它等于线段上已有的点数（来自 loadTrackWithStreaming）
-                if (totalKnownPoints === undefined) {
-                    totalKnownPoints = overlay.pointsCount || 0;
-                }
-                
-                // 获取或创建缓冲区。它可能已由 loadTrackWithStreaming 创建并包含数据
-                if (!recordingTrackPartialBuffers[trackId]) {
-                    const initialPageCount = Math.floor((overlay.pointsCount || 0) / GPS_PAGE_SIZE);
-                    const pointsInLastPage = (overlay.pointsCount || 0) % GPS_PAGE_SIZE;
-                    let backfillPoints = [];
+                debugLog(`Polling for huoyunId: ${huoyunId}`);
 
-                    if (pointsInLastPage > 0) {
-                        debugLog(`Backfilling buffer for track ${trackId} with ${pointsInLastPage} points.`);
-                        const existingPath = overlay.polyline.getPath().getArray();
-                        const pointsToBackfill = existingPath.slice(existingPath.length - pointsInLastPage);
-                        // 将 google.maps.LatLng 对象转换为缓存需要的格式。
-                        // 注意：速度和时间戳信息会丢失，但这样做可以保证轨迹点位置的缓存完整性。
-                        backfillPoints = pointsToBackfill.map(p => ({ lat: p.lat(), lng: p.lng(), timestamp: null, speed: null }));
-                    }
+                try {
+                    // Re-fetch all points for the huoyunId and re-render all tracks.
+                    const allPoints = [];
+                    let page = 1;
+                    let keepFetching = true;
 
-                    recordingTrackPartialBuffers[trackId] = {
-                        points: backfillPoints,
-                        targetPage: initialPageCount + 1
-                    };
-                }
-                const buffer = recordingTrackPartialBuffers[trackId];
-                
-                // 从我们知道的最后一个点开始请求
-                let skip = totalKnownPoints;
-                let keepPollingPage = true;
-                const newPointsAccumulator = [];
-
-                while (keepPollingPage) {
-                    try {
-                        const payload = { trackId, skip, pagesize: GPS_PAGE_SIZE };
-                        const response = await authenticatedFetch(TRACE_POINTS_API_URL, {
-                            method: 'POST',
-                            body: JSON.stringify(payload)
-                        });
-
-                        if (!response.ok) throw new Error(`HTTP 错误: ${response.status}`);
+                    while(keepFetching) {
+                        const payload = { huoyunId, skip: (page - 1) * GPS_PAGE_SIZE, pagesize: GPS_PAGE_SIZE };
+                        const response = await authenticatedFetch(TRACE_POINTS_API_URL, { method: 'POST', body: JSON.stringify(payload) });
+                        const json = await response.json();
                         
-                        const jsonResponse = await response.json();
-                        if (jsonResponse.code !== 0 || !Array.isArray(jsonResponse.data)) {
-                            throw new Error(`API 返回数据格式错误: ${jsonResponse.message || ''}`);
-                        }
-
-                        const newPoints = jsonResponse.data.map(p => ({
-                            lat: p.lat,
-                            lng: p.lng,
-                            timestamp: p.ts,
-                            speed: typeof p.speed === 'number' ? p.speed : null
-                        }));
-
-                        if (newPoints.length > 0) {
-                            newPointsAccumulator.push(...newPoints);
-
-                            // 将新获取的点添加到缓冲区，并推入平滑渲染队列
-                            if (!renderingQueue[trackId]) {
-                                renderingQueue[trackId] = { points: [], timeToRenderMs: 0 };
+                        if (json.code === 0 && Array.isArray(json.data)) {
+                            if (json.data.length > 0) {
+                                allPoints.push(...json.data);
                             }
-                            const pointsToRender = newPoints.map(p => ({ lat: p.lat, lng: p.lng }));
-                            renderingQueue[trackId].points.push(...pointsToRender);
-
-                            // 计算渲染总时间 = 新加载点的流逝时间
-                            const firstPointTs = newPoints[0]?.timestamp;
-                            const lastPointTs = newPoints[newPoints.length - 1]?.timestamp;
-
-                            let elapsedTime = 0;
-                            if (firstPointTs && lastPointTs && lastPointTs > firstPointTs) {
-                                elapsedTime = lastPointTs - firstPointTs;
+                            if (json.data.length < GPS_PAGE_SIZE) {
+                                keepFetching = false;
+                            } else {
+                                page++;
                             }
-                            // 将流逝时间赋给 timeToRenderMs，让渲染循环去处理
-                            renderingQueue[trackId].timeToRenderMs += elapsedTime;
-                            debugLog(`Queued ${newPoints.length} points for smooth rendering over ${elapsedTime}ms.`);
-                        }
-
-                        if (newPoints.length < GPS_PAGE_SIZE) {
-                            keepPollingPage = false;
                         } else {
-                            // 为同一次轮询中的下一次分页请求更新 skip 值
-                            skip += newPoints.length;
+                           throw new Error(`API error while polling for huoyunId ${huoyunId}: ${json.message}`);
                         }
-
-                    } catch (error) {
-                        console.error(`轮询轨迹 ${trackId} 失败:`, error);
-                        keepPollingPage = false; // 出错时停止本次轮询
                     }
-                }
 
-                // 如果没有新点，则结束本次轮询
-                if (newPointsAccumulator.length === 0) {
-                    return;
-                }
+                    if (allPoints.length > 0) {
+                        const pointsByTrackId = allPoints.reduce((acc, point) => {
+                            const trackId = point.track_id || point.trackId;
+                            if (trackId) {
+                                if (!acc[trackId]) acc[trackId] = [];
+                                acc[trackId].push(point);
+                            }
+                            return acc;
+                        }, {});
 
-                // 如果这是占位符覆盖物的第一个点批次，
-                // 我们需要正确地初始化标记。
-                if (overlay.pointsCount === 0) {
-                    debugLog(`正在为占位符轨迹 ${trackId} 初始化标记。`);
-                    const firstPoint = newPointsAccumulator[0];
-                    const firstPosition = new google.maps.LatLng(firstPoint.lat, firstPoint.lng);
-                    
-                    overlay.startMarker.setPosition(firstPosition);
-                    overlay.startMarker.setIcon(buildStartMarkerIcon(overlay.color));
-                    overlay.startMarker.setTitle(`轨迹起点: ${trackId}`);
-                    overlay.startMarker.setVisible(true);
+                        Object.keys(pointsByTrackId).forEach((trackId, index) => {
+                            const pointsForTrack = pointsByTrackId[trackId].map(p => ({ lat: p.lat, lng: p.lng, timestamp: p.ts, speed: p.speed }));
+                            pointsForTrack.sort((a, b) => a.timestamp - b.timestamp);
+                            
+                            const originalTrack = currentTrackData.tracks.find(t => t._id === trackId);
+                            const isLatest = trackId === currentTrackData.latestTrackId;
+                            const color = trackOverlayMap[trackId]?.color || TRACE_COLORS[index % TRACE_COLORS.length];
 
-                    // 结束标记将在下面完全配置，但我们现在必须使其可见。
-                    overlay.endMarker.setVisible(true);
-                }
-
-                // 更新总点数计数器，并立即更新 overlay 的点数以反映收到的总数
-                totalKnownPoints += newPointsAccumulator.length;
-                overlay.pointsCount = totalKnownPoints;
-                
-                buffer.points.push(...newPointsAccumulator);
-                debugLog(`Track ${trackId} watcher: Added ${newPointsAccumulator.length} new points. Buffer now has ${buffer.points.length} points.`);
-
-                // 检查缓冲区是否已满，如果满了就写入缓存
-                while (buffer.points.length >= GPS_PAGE_SIZE) {
-                    const pageToWrite = buffer.points.splice(0, GPS_PAGE_SIZE);
-                    
-                    debugLog(`Track ${trackId} watcher: Buffer full. Writing page ${buffer.targetPage} to cache.`);
-                    writeGpsPageCache(trackId, buffer.targetPage, pageToWrite);
-                    
-                    // 为下一次缓存写入更新页码
-                    buffer.targetPage++;                    
-                }
-                
-                // 使用最新获取的点来更新末端标记
-                const lastPoint = newPointsAccumulator[newPointsAccumulator.length - 1];
-                if (lastPoint) {
-                    const lastPosition = new google.maps.LatLng(lastPoint.lat, lastPoint.lng);
-                    overlay.endMarker.setPosition(lastPosition);
-
-                    const latestTimestamp = getLatestTimestamp(newPointsAccumulator);
-                    const latestSpeed = getLatestSpeed(newPointsAccumulator);
-
-                    if (latestTimestamp) overlay.latestTimestamp = latestTimestamp;
-                    if (latestSpeed !== null) overlay.speed = latestSpeed;
-                    
-                    overlay.endMarker.setIcon(buildEndMarkerIcon({
-                        color: overlay.color,
-                        isLatest: overlay.isLatest,
-                        huoyunId: overlay.huoyunId,
-                        speed: overlay.speed,
-                        status: overlay.status,
-                        latestTimestamp: overlay.latestTimestamp
-                    }));
-
-                    attachRouteClick(overlay.endMarker, lastPosition.toJSON());
+                            drawOrUpdateTrace({
+                                trackId,
+                                points: pointsForTrack,
+                                isLatest,
+                                color,
+                                status: originalTrack ? originalTrack.status : 'recording',
+                                huoyunId,
+                                speed: getLatestSpeed(pointsForTrack)
+                            });
+                        });
+                    }
+                } catch(e) {
+                    console.error(`Error during watcher poll for ${huoyunId}:`, e);
                 }
             };
 
-            recordingTrackTimers[trackId] = setInterval(poll, RECORDING_POLL_INTERVAL_MS);
+            recordingTrackTimers[huoyunId] = setInterval(poll, RECORDING_POLL_INTERVAL_MS);
         }
 
         /**
@@ -2306,127 +2205,27 @@
          * @param {string} huoyunId - 要加载的货运单 ID。
          */
         async function loadAllTracesForHuoyun(huoyunId) {
-            clearMapLayers(); // This also stops all previous watchers.
+            clearMapLayers();
             const trackData = huoyunTrackData[huoyunId];
             if (!trackData || !Array.isArray(trackData.tracks) || trackData.tracks.length === 0) {
                 traceStateElement.textContent = '未找到任何轨迹数据。';
                 return;
             }
 
-            const allTracks = trackData.tracks;
-            const totalTracks = allTracks.length;
             const bounds = new google.maps.LatLngBounds();
-            let renderedCount = 0;
-            let failedCount = 0;
-
-            gpsButton.disabled = true; // 禁用按钮防止重复点击
+            gpsButton.disabled = true;
             traceStateElement.textContent = '正在加载...';
+            loadingStatusArea.innerHTML = `正在加载货运单号 <span class="font-bold text-primary-blue">${huoyunId}</span> 的所有轨迹点...`;
 
-            for (let i = 0; i < totalTracks; i++) {
-                const track = allTracks[i];
-                if (!track || !track._id) continue;
-                const trackId = track._id;
-                const trackStatus = (track.status || 'unknown').toLowerCase();
-                const isLatest = trackId === trackData.latestTrackId;
-                const color = isLatest ? TRACE_COLORS[0] : TRACE_COLORS[0];
-
-                loadingStatusArea.innerHTML = `正在加载轨迹 <span class="font-bold text-primary-blue">${i + 1}/${totalTracks}</span> (ID: ${trackId})...`;
-
-                try {
-                    const success = await loadTrackWithStreaming({
-                        trackId,
-                        huoyunId,
-                        color,
-                        isLatest,
-                        status: trackStatus,
-                        trackIndex: i + 1,
-                        totalTracks,
-                        bounds
-                    });
-
-                    if (success) {
-                        renderedCount++;
-                    } else {
-                        failedCount++;
-                    }
-                    
-                    traceStateElement.textContent = `已渲染 成功:${renderedCount}/${totalTracks} 无效:${failedCount}/${totalTracks} 条轨迹...`;
-
-                } catch (error) {
-                    console.error(`加载轨迹 ${trackId} 失败:`, error);
-                    failedCount++;
-                }
-            }
-
-            loadingStatusArea.textContent = ''; // 清除加载状态
-
-            if (renderedCount > 0) {
-                if (bounds && typeof bounds.isEmpty === 'function' && !bounds.isEmpty()) {
-                    map.fitBounds(bounds);
-                    debugLog(`FitBounds: Final fit for huoyunId '${currentHuoyunId}' to show all loaded tracks.`);
-                    if (map.getZoom() > 15) {
-                        map.setZoom(15);
-                    }
-                }
-                traceStateElement.textContent = `加载完成：成功:${renderedCount}/${totalTracks} 无效:${failedCount}/${totalTracks} 条轨迹。`;
-            } else {
-                traceStateElement.textContent = `加载失败：未找到任何有效的轨迹数据。`;
-            }
-            
-            // New Watcher Logic: Start watcher only if the latest track is 'recording'.
-            const latestTrack = trackData.tracks.find(t => t._id === trackData.latestTrackId);
-            if (latestTrack && (latestTrack.status || '').toLowerCase() === 'recording') {
-                debugLog(`最新轨迹 ${latestTrack._id} 是 recording 状态，启动观察者。`);
-                startRecordingWatcher(latestTrack._id);
-            } else {
-                debugLog(`最新轨迹 ${latestTrack._id} 是 finished 状态，无需启动观察者。`);
-            }
-
-            gpsButton.disabled = false; // 重新启用按钮
-        }
-
-
-        const GPS_PAGE_SIZE = 1000;
-
-        /**
-         * 边加载边绘制单条轨迹 (使用分页缓存)。
-         * @param {Object} params
-         * @returns {Promise<Array|null>}
-         */
-        async function loadTrackWithStreaming(params) {
-            const {
-                trackId,
-                huoyunId,
-                color,
-                isLatest,
-                status,
-                trackIndex,
-                totalTracks,
-                bounds
-            } = params;
-
-            if (!trackId) return null;
-            const normalizedStatus = (status || 'unknown').toLowerCase();
-            const isRecording = normalizedStatus === 'recording';
-            
-            let allPoints = [];
+            const allPoints = [];
             let page = 1;
             let keepFetching = true;
 
-            while (keepFetching) {
-                if (typeof trackIndex === 'number' && typeof totalTracks === 'number') {
-                    loadingStatusArea.innerHTML = `
-                        轨迹 <span class="font-bold text-primary-blue">${trackIndex}/${totalTracks}</span>
-                        已加载 <span class="font-bold text-accent-orange">${allPoints.length}</span> 个点 (第 ${page} 页)...
-                    `;
-                }
-
-                const cachedPage = readGpsPageCache(trackId, page);
-                let points = [];
-
-                if (cachedPage) {
-                    points = cachedPage;
-                } else {
+            try {
+                // 1. Fetch all points for the huoyunId page by page
+                while (keepFetching) {
+                    loadingStatusArea.innerHTML = `正在加载货运单号 <span class="font-bold text-primary-blue">${huoyunId}</span> 的轨迹点 (第 ${page} 页)...`;
+                    
                     let attempt = 0;
                     const maxAttempts = 3;
                     let pageData = null;
@@ -2435,131 +2234,115 @@
                     while (attempt < maxAttempts) {
                         try {
                             const delay = 500 * Math.pow(2, attempt);
-                            if (attempt > 0) {
-                                await new Promise(resolve => setTimeout(resolve, delay));
-                            }
+                            if (attempt > 0) await new Promise(resolve => setTimeout(resolve, delay));
 
                             const skip = (page - 1) * GPS_PAGE_SIZE;
-                            const payload = { trackId, skip, pagesize: GPS_PAGE_SIZE };
+                            const payload = { huoyunId, skip, pagesize: GPS_PAGE_SIZE };
 
-                            debugLog(`Load: Fetching points for track '${trackId}', page ${page} (skip: ${skip}).`);
+                            debugLog(`Load: Fetching points for huoyunId '${huoyunId}', page ${page} (skip: ${skip}).`);
 
                             const response = await authenticatedFetch(TRACE_POINTS_API_URL, {
                                 method: 'POST',
                                 body: JSON.stringify(payload)
                             });
 
-                            if (!response.ok) {
-                                throw new Error(`HTTP 错误: ${response.status} ${response.statusText}`);
-                            }
-
+                            if (!response.ok) throw new Error(`HTTP 错误: ${response.status} ${response.statusText}`);
+                            
                             const jsonResponse = await response.json();
-
                             if (jsonResponse.code === 0 && Array.isArray(jsonResponse.data)) {
                                 pageData = jsonResponse.data;
                                 success = true;
-                                debugLog(`Load Success: Received ${pageData.length} points for track '${trackId}', page ${page}.`);
+                                debugLog(`Load Success: Received ${pageData.length} points for huoyunId '${huoyunId}', page ${page}.`);
                                 break;
                             } else {
                                 throw new Error(`云函数业务错误: ${jsonResponse.message || '未知错误'}`);
                             }
-
                         } catch (error) {
                             attempt++;
-                            debugLog(`Load Error: Failed to fetch points for track '${trackId}', page ${page}. Attempt ${attempt}/${maxAttempts}. Error: ${error.message}`);
-                            console.error(`获取轨迹 ${trackId} 第 ${page} 页失败，重试中...`);
-                            if (attempt >= maxAttempts) {
-                                throw new Error(`无法从 API 加载轨迹 ${trackId}。`);
-                            }
+                            debugLog(`Load Error: Failed to fetch points for huoyunId '${huoyunId}', page ${page}. Attempt ${attempt}/${maxAttempts}. Error: ${error.message}`);
+                            if (attempt >= maxAttempts) throw new Error(`无法从 API 加载货运单号 ${huoyunId} 的轨迹点。`);
                         }
                     }
 
-                    if (!success || !Array.isArray(pageData)) {
-                        keepFetching = false;
-                        break;
+                    if (success && pageData.length > 0) {
+                        allPoints.push(...pageData);
                     }
-                
-                    const normalizedPoints = pageData.map(p => ({
+
+                    if (!success || pageData.length < GPS_PAGE_SIZE) {
+                        keepFetching = false;
+                    } else {
+                        page++;
+                    }
+                }
+
+                if (allPoints.length === 0) {
+                    traceStateElement.textContent = `货运单号 ${huoyunId} 无轨迹点数据。`;
+                    loadingStatusArea.textContent = '';
+                    gpsButton.disabled = false;
+                    return;
+                }
+
+                // 2. Group points by trackId
+                const pointsByTrackId = allPoints.reduce((acc, point) => {
+                    const trackId = point.track_id || point.trackId;
+                    if (!trackId) return acc;
+                    if (!acc[trackId]) acc[trackId] = [];
+                    acc[trackId].push(point);
+                    return acc;
+                }, {});
+
+                // 3. Render each track
+                const trackIds = Object.keys(pointsByTrackId);
+                debugLog(`Loaded points for ${trackIds.length} tracks.`);
+
+                trackIds.forEach((trackId, index) => {
+                    const pointsForTrack = pointsByTrackId[trackId].map(p => ({
                         lat: p.lat,
                         lng: p.lng,
                         timestamp: p.ts,
                         speed: typeof p.speed === 'number' ? p.speed : null
                     }));
 
-                    // 缓存逻辑:
-                    // - recording轨迹: 只有满页才写入缓存. 不满的最后一页存入 partial buffer.
-                    // - finished轨迹: 所有页都写入缓存.
-                    if (normalizedPoints.length > 0) {
-                        if (isRecording) {
-                            if (normalizedPoints.length === GPS_PAGE_SIZE) {
-                                writeGpsPageCache(trackId, page, normalizedPoints);
-                            } else {
-                                // 这是 recording 轨迹的最后一页，且不满，存入缓冲区
-                                recordingTrackPartialBuffers[trackId] = {
-                                    points: normalizedPoints,
-                                    targetPage: page
-                                };
-                                debugLog(`Track ${trackId} (recording) last partial page buffered with ${normalizedPoints.length} points for page ${page}.`);
-                            }
-                        } else {
-                            // finished 轨迹，总是写入缓存
-                            writeGpsPageCache(trackId, page, normalizedPoints);
-                        }
-                    }
+                    pointsForTrack.sort((a, b) => a.timestamp - b.timestamp);
 
-                    points = normalizedPoints;
-                }
-                
-                // render newly loaded points
-                if (points && points.length > 0) {
-                    allPoints.push(...points);
+                    const originalTrack = trackData.tracks.find(t => t._id === trackId);
+                    const isLatest = trackId === trackData.latestTrackId;
+                    const color = TRACE_COLORS[index % TRACE_COLORS.length];
 
                     drawOrUpdateTrace({
                         trackId,
-                        points: allPoints,
+                        points: pointsForTrack,
                         isLatest,
                         color,
-                        status: normalizedStatus,
+                        status: originalTrack ? originalTrack.status : 'unknown',
                         huoyunId,
-                        speed: getLatestSpeed(allPoints)
+                        speed: getLatestSpeed(pointsForTrack)
                     });
-                    extendBoundsWithPoints(bounds, points);
+                    extendBoundsWithPoints(bounds, pointsForTrack);
+                });
 
-                    // 如果是第一条轨迹的第一页，立即调整视野
-                    if (trackIndex === 1 && page === 1 && bounds && !bounds.isEmpty()) {
-                        map.fitBounds(bounds);
-                        debugLog(`FitBounds: Initial fit for first page of track '${trackId}'.`);
-                        if (map.getZoom() > 15) {
-                            map.setZoom(15);
-                        }
-                    }
+                if (bounds && !bounds.isEmpty()) {
+                    map.fitBounds(bounds);
                 }
-                
-                // stopping criterior
-                if (points.length < GPS_PAGE_SIZE) {
-                    keepFetching = false;
-                } else {
-                    page++;
-                }
-            }
-            
-            // 确保最后完整绘制一次
-            drawOrUpdateTrace({
-                trackId,
-                points: allPoints,
-                isLatest,
-                color,
-                status: normalizedStatus,
-                huoyunId,
-                speed: getLatestSpeed(allPoints)
-            });
+                traceStateElement.textContent = `加载完成：货运单号 ${huoyunId} 的 ${trackIds.length} 条轨迹。`;
 
-            if (allPoints.length > 0) {
-                return allPoints;
+            } catch (error) {
+                console.error(`加载货运单号 ${huoyunId} 的轨迹失败:`, error);
+                traceStateElement.textContent = `加载失败：${error.message}`;
             }
 
-            return null;
+            loadingStatusArea.textContent = '';
+            gpsButton.disabled = false;
+
+            const latestTrack = trackData.tracks.find(t => t._id === trackData.latestTrackId);
+            if (latestTrack && (latestTrack.status || '').toLowerCase() === 'recording') {
+                debugLog(`最新轨迹 ${latestTrack._id} 是 recording 状态，为 huoyunId ${huoyunId} 启动观察者。`);
+                startRecordingWatcher(huoyunId);
+            }
         }
+
+
+        const GPS_PAGE_SIZE = 1000;
 
         /**
          * 创建终点图标 (货车或圆点)。
