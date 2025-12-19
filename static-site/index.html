@@ -2322,7 +2322,9 @@
                 });
 
                 if (bounds && !bounds.isEmpty()) {
-                    map.fitBounds(bounds);
+                    setTimeout(() => {
+                        map.fitBounds(bounds);
+                    }, 100);
                 }
                 traceStateElement.textContent = `加载完成: 货运单号 ${huoyunId} 的 ${trackIds.length} 条非空轨迹.`;
 
