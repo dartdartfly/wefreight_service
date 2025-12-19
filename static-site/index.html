@@ -957,7 +957,7 @@
         let currentHuoyunId = null; // 新增：保存当前正在查看的 huoyunId
         let trackOverlayMap = {}; // trackId -> { polyline, startMarker, endMarker, color, isLatest, status }
         let recordingTrackTimers = {}; // trackId -> intervalId
-        const RECORDING_POLL_INTERVAL_MS = 10000; // recording 轨迹刷新频率 (毫秒)
+        const RECORDING_POLL_INTERVAL_MS = 30 * 1000; // recording 轨迹刷新频率 (毫秒)
         let recordingTrackPartialBuffers = {}; // trackId -> { points: [], targetPage: number }
         let routeMap = null;
         let routeDirectionsService = null;
