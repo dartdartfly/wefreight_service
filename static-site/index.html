@@ -2324,7 +2324,7 @@
                 if (bounds && !bounds.isEmpty()) {
                     map.fitBounds(bounds);
                 }
-                traceStateElement.textContent = `加载完成：货运单号 ${huoyunId} 的 ${trackIds.length} 条轨迹。`;
+                traceStateElement.textContent = `加载完成: 货运单号 ${huoyunId} 的 ${trackIds.length} 条非空轨迹.`;
 
             } catch (error) {
                 console.error(`加载货运单号 ${huoyunId} 的轨迹失败:`, error);
