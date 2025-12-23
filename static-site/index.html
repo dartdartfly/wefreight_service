@@ -942,7 +942,7 @@
         } 
 
         // --- 缓存配置 ---
-        const TRACKS_CACHE_EXPIRATION_MS = 300000; // 5分钟, /getTracks 缓存有效期
+        const TRACKS_CACHE_EXPIRATION_MS = Infinity; // 不过期, /getTracks 缓存有效期
         const GPS_PAGE_CACHE_EXPIRATION_MS = Infinity; // 轨迹点 /getTrackPoints 缓存有效期设置为无限
         const TRACKS_CACHE_KEY = 'matrix_tracks_cache_v1';
         const GPS_TRACE_CACHE_PREFIX = 'gps_trace_';
