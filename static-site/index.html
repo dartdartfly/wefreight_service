@@ -1462,6 +1462,52 @@
             }
         }
 
+        function readHuoyunGpsPageCache(huoyunId, page) {
+            const key = `${GPS_TRACE_CACHE_PREFIX}huoyun_${huoyunId}_page_${page}`;
+            debugLog(`Cache Read: Attempting to get GPS page from key '${key}'.`);
+            if (typeof localStorage === 'undefined' || !huoyunId) return null;
+            try {
+                const raw = localStorage.getItem(key);
+                if (!raw) {
+                    debugLog(`Cache Read Miss: Key '${key}' not found.`);
+                    return null;
+                }
+                const cache = JSON.parse(raw);
+                if (!cache || !Array.isArray(cache.data)) {
+                    debugLog(`Cache Read Invalid: Data for key '${key}' is malformed.`);
+                    return null;
+                }
+                if (Date.now() - cache.timestamp > GPS_PAGE_CACHE_EXPIRATION_MS) {
+                    debugLog(`Cache Read Expired: Key '${key}' is stale.`);
+                    localStorage.removeItem(key);
+                    return null;
+                }
+                debugLog(`Cache Read Hit: Found ${cache.data.length} points in key '${key}'.`);
+                return cache.data;
+            } catch (error) {
+                debugLog(`Cache Read Error: Failed for key '${key}'. Error: ${error.message}`);
+                console.warn(`读取轨迹分页缓存失败 for huoyun ${huoyunId} page ${page}:`, error);
+                return null;
+            }
+        }
+
+        function writeHuoyunGpsPageCache(huoyunId, page, points) {
+            const key = `${GPS_TRACE_CACHE_PREFIX}huoyun_${huoyunId}_page_${page}`;
+            debugLog(`Cache Write: Setting ${points.length} points for key '${key}'.`);
+            if (typeof localStorage === 'undefined' || !huoyunId) return;
+            if (!Array.isArray(points)) return;
+            try {
+                localStorage.setItem(key, JSON.stringify({
+                    timestamp: Date.now(),
+                    data: points
+                }));
+            } catch (error) {
+                debugLog(`Cache Write Error: Failed for key '${key}'. Error: ${error.message}`);
+                console.warn(`保存轨迹分页缓存失败 for huoyun ${huoyunId} page ${page}:`, error);
+            }
+        }
+
+
         /**
          * 将最新 /getTracks 结果写入 localStorage。
          * @param {Array} tracks - 货车列表
@@ -2287,50 +2333,61 @@
                 while (keepFetching) {
                     loadingStatusArea.innerHTML = `正在加载货运单号 <span class="font-bold text-primary-blue">${huoyunId}</span> 的轨迹点 (第 ${page} 页)...`;
                     
-                    let attempt = 0;
-                    const maxAttempts = 3;
-                    let pageData = null;
-                    let success = false;
+                    let pageData = readHuoyunGpsPageCache(huoyunId, page);
+                    let success = pageData !== null;
+                    
+                    if (!success) {
+                        let attempt = 0;
+                        const maxAttempts = 3;
+                        
+                        while (attempt < maxAttempts) {
+                            try {
+                                const delay = 500 * Math.pow(2, attempt);
+                                if (attempt > 0) await new Promise(resolve => setTimeout(resolve, delay));
 
-                    while (attempt < maxAttempts) {
-                        try {
-                            const delay = 500 * Math.pow(2, attempt);
-                            if (attempt > 0) await new Promise(resolve => setTimeout(resolve, delay));
+                                const skip = (page - 1) * GPS_PAGE_SIZE;
+                                const payload = { huoyunId, skip, pagesize: GPS_PAGE_SIZE };
 
-                            const skip = (page - 1) * GPS_PAGE_SIZE;
-                            const payload = { huoyunId, skip, pagesize: GPS_PAGE_SIZE };
+                                debugLog(`Load: Fetching points for huoyunId '${huoyunId}', page ${page} (skip: ${skip}).`);
 
-                            debugLog(`Load: Fetching points for huoyunId '${huoyunId}', page ${page} (skip: ${skip}).`);
+                                const response = await authenticatedFetch(TRACE_POINTS_API_URL, {
+                                    method: 'POST',
+                                    body: JSON.stringify(payload)
+                                });
 
-                            const response = await authenticatedFetch(TRACE_POINTS_API_URL, {
-                                method: 'POST',
-                                body: JSON.stringify(payload)
-                            });
-
-                            if (!response.ok) throw new Error(`HTTP 错误: ${response.status} ${response.statusText}`);
-                            
-                            const jsonResponse = await response.json();
-                            if (jsonResponse.code === 0 && Array.isArray(jsonResponse.data)) {
-                                pageData = jsonResponse.data;
-                                success = true;
-                                debugLog(`Load Success: Received ${pageData.length} points for huoyunId '${huoyunId}', page ${page}.`);
-                                break;
-                            } else {
-                                throw new Error(`云函数业务错误: ${jsonResponse.message || '未知错误'}`);
+                                if (!response.ok) throw new Error(`HTTP 错误: ${response.status} ${response.statusText}`);
+                                
+                                const jsonResponse = await response.json();
+                                if (jsonResponse.code === 0 && Array.isArray(jsonResponse.data)) {
+                                    pageData = jsonResponse.data;
+                                    success = true;
+                                    if (pageData.length === GPS_PAGE_SIZE) {
+                                        writeHuoyunGpsPageCache(huoyunId, page, pageData); // Write to cache
+                                        debugLog(`Cache Write: Caching complete page ${page} for huoyunId '${huoyunId}'.`);
+                                    } else {
+                                        debugLog(`Cache Skip: Not caching incomplete page ${page} (size: ${pageData.length}) for huoyunId '${huoyunId}'.`);
+                                    }
+                                    debugLog(`Load Success: Received ${pageData.length} points for huoyunId '${huoyunId}', page ${page}.`);
+                                    break;
+                                } else {
+                                    throw new Error(`云函数业务错误: ${jsonResponse.message || '未知错误'}`);
+                                }
+                            } catch (error) {
+                                attempt++;
+                                debugLog(`Load Error: Failed to fetch points for huoyunId '${huoyunId}', page ${page}. Attempt ${attempt}/${maxAttempts}. Error: ${error.message}`);
+                                if (attempt >= maxAttempts) throw new Error(`无法从 API 加载货运单号 ${huoyunId} 的轨迹点。`);
                             }
-                        } catch (error) {
-                            attempt++;
-                            debugLog(`Load Error: Failed to fetch points for huoyunId '${huoyunId}', page ${page}. Attempt ${attempt}/${maxAttempts}. Error: ${error.message}`);
-                            if (attempt >= maxAttempts) throw new Error(`无法从 API 加载货运单号 ${huoyunId} 的轨迹点。`);
                         }
+                    } else {
+                        debugLog(`Cache Hit: Using cached points for huoyunId '${huoyunId}', page ${page}.`);
                     }
 
-                    if (success && pageData.length > 0) {
+                    if (success && pageData && pageData.length > 0) {
                         allPoints.push(...pageData);
                         huoyunPointsCounter[huoyunId] += pageData.length; // Update total points count
                     }
 
-                    if (!success || pageData.length < GPS_PAGE_SIZE) {
+                    if (!success || !pageData || pageData.length < GPS_PAGE_SIZE) {
                         keepFetching = false;
                     } else {
                         page++;
