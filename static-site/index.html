@@ -975,6 +975,7 @@
         let huoyunTrackData = {}; 
         let currentHuoyunId = null; // 新增：保存当前正在查看的 huoyunId
         let trackOverlayMap = {}; // trackId -> { polyline, startMarker, endMarker, color, isLatest, status }
+        let huoyunPointsCounter = {}; // For polling optimization, counts points per huoyunId
         let recordingTrackTimers = {}; // trackId -> intervalId
         const RECORDING_POLL_INTERVAL_MS = 60 * 1000; // recording 轨迹刷新频率 (毫秒)
         let recordingTrackPartialBuffers = {}; // trackId -> { points: [], targetPage: number }
@@ -1598,19 +1599,22 @@
                 debugLog(`Polling for huoyunId: ${huoyunId}`);
 
                 try {
-                    // Re-fetch all points for the huoyunId and re-render all tracks.
-                    const allPoints = [];
-                    let page = 1;
+                    // OPTIMIZED: Fetch only new points
+                    const skipCount = huoyunPointsCounter[huoyunId] || 0;
+                    const newPoints = [];
+                    let page = 0;
                     let keepFetching = true;
 
-                    while(keepFetching) {
-                        const payload = { huoyunId, skip: (page - 1) * GPS_PAGE_SIZE, pagesize: GPS_PAGE_SIZE };
+                    debugLog(`Polling for ${huoyunId} with skip: ${skipCount}`);
+
+                    while (keepFetching) {
+                        const payload = { huoyunId, skip: skipCount + (page * GPS_PAGE_SIZE), pagesize: GPS_PAGE_SIZE };
                         const response = await authenticatedFetch(TRACE_POINTS_API_URL, { method: 'POST', body: JSON.stringify(payload) });
                         const json = await response.json();
-                        
+
                         if (json.code === 0 && Array.isArray(json.data)) {
                             if (json.data.length > 0) {
-                                allPoints.push(...json.data);
+                                newPoints.push(...json.data);
                             }
                             if (json.data.length < GPS_PAGE_SIZE) {
                                 keepFetching = false;
@@ -1618,12 +1622,17 @@
                                 page++;
                             }
                         } else {
-                           throw new Error(`API error while polling for huoyunId ${huoyunId}: ${json.message}`);
+                            throw new Error(`API error while polling for huoyunId ${huoyunId}: ${json.message}`);
                         }
                     }
 
-                    if (allPoints.length > 0) {
-                        const pointsByTrackId = allPoints.reduce((acc, point) => {
+                    if (newPoints.length > 0) {
+                        debugLog(`Fetched ${newPoints.length} new points for ${huoyunId}.`);
+                        // Update the counter
+                        huoyunPointsCounter[huoyunId] = (huoyunPointsCounter[huoyunId] || 0) + newPoints.length;
+
+                        // Group new points by trackId
+                        const pointsByTrackId = newPoints.reduce((acc, point) => {
                             const trackId = point.track_id || point.trackId;
                             if (trackId) {
                                 if (!acc[trackId]) acc[trackId] = [];
@@ -1632,26 +1641,30 @@
                             return acc;
                         }, {});
 
-                        Object.keys(pointsByTrackId).forEach((trackId, index) => {
+                        // Append new points to the existing polylines
+                        Object.keys(pointsByTrackId).forEach((trackId) => {
                             const pointsForTrack = pointsByTrackId[trackId].map(p => ({ lat: p.lat, lng: p.lng, timestamp: p.ts, speed: p.speed }));
                             pointsForTrack.sort((a, b) => a.timestamp - b.timestamp);
-                            
+
                             const originalTrack = currentTrackData.tracks.find(t => t._id === trackId);
                             const isLatest = trackId === currentTrackData.latestTrackId;
-                            const color = trackOverlayMap[trackId]?.color || TRACE_COLORS[index % TRACE_COLORS.length];
 
+                            // Simply call drawOrUpdateTrace with the NEW points.
+                            // This will add them to the rendering queue, which appends them to the polyline.
                             drawOrUpdateTrace({
                                 trackId,
                                 points: pointsForTrack,
                                 isLatest,
-                                color,
+                                color: trackOverlayMap[trackId]?.color || TRACE_COLORS[currentTrackData.tracks.findIndex(t => t._id === trackId) % TRACE_COLORS.length],
                                 status: originalTrack ? originalTrack.status : 'recording',
                                 huoyunId,
                                 speed: getLatestSpeed(pointsForTrack)
                             });
                         });
+                    } else {
+                        debugLog(`No new points for ${huoyunId}.`);
                     }
-                } catch(e) {
+                } catch (e) {
                     console.error(`Error during watcher poll for ${huoyunId}:`, e);
                 }
             };
@@ -2253,6 +2266,7 @@
          */
         async function loadAllTracesForHuoyun(huoyunId) {
             clearMapLayers();
+            huoyunPointsCounter[huoyunId] = 0; // Reset point counter for this ID
             const trackData = huoyunTrackData[huoyunId];
             if (!trackData || !Array.isArray(trackData.tracks) || trackData.tracks.length === 0) {
                 traceStateElement.textContent = '未找到任何轨迹数据。';
@@ -2313,6 +2327,7 @@
 
                     if (success && pageData.length > 0) {
                         allPoints.push(...pageData);
+                        huoyunPointsCounter[huoyunId] += pageData.length; // Update total points count
                     }
 
                     if (!success || pageData.length < GPS_PAGE_SIZE) {
