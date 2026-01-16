@@ -977,7 +977,7 @@
         let trackOverlayMap = {}; // trackId -> { polyline, startMarker, endMarker, color, isLatest, status }
         let huoyunPointsCounter = {}; // For polling optimization, counts points per huoyunId
         let recordingTrackTimers = {}; // trackId -> intervalId
-        const RECORDING_POLL_INTERVAL_MS = 60 * 1000; // recording 轨迹刷新频率 (毫秒)
+        const RECORDING_POLL_INTERVAL_MS = 120 * 1000; // recording 轨迹刷新频率 (毫秒)
         let recordingTrackPartialBuffers = {}; // trackId -> { points: [], targetPage: number }
         let routeMap = null;
         let routeDirectionsService = null;
